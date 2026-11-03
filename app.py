@@ -18,6 +18,7 @@ import math
 import uuid
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import streamlit as st
 
@@ -1260,8 +1261,8 @@ def page_doc():
             J["custAddress"] = st.text_area("Customer address", J.get("custAddress") or "", height=72)
 
         with st.container(border=True):
-            st.markdown("**Send to customer**")
-            st.caption("Save the PDF, then attach it to your email.")
+            st.markdown("**1. Download the PDF**")
+            st.caption("Save the file, then attach it when you send the email.")
             if not HAS_REPORTLAB:
                 st.error("Install reportlab: pip install reportlab")
             else:
@@ -1279,7 +1280,7 @@ def page_doc():
                 except Exception as exc:
                     st.error(str(exc))
             st.download_button(
-                "Copy as text",
+                "Download as text",
                 data=model_text(m),
                 file_name=f"{m['number']}.txt",
                 mime="text/plain",
@@ -1287,16 +1288,52 @@ def page_doc():
             )
 
         with st.container(border=True):
-            st.markdown("**Email**")
+            st.markdown("**2. Send by email**")
+            st.caption(
+                "Opens your email app with the message filled in. "
+                "Attach the PDF you just downloaded before sending."
+            )
             if not J.get("emailEdited"):
                 subj, body = email_template(S, J, m)
                 J["emailSubject"], J["emailBody"] = subj, body
-            J["emailSubject"] = st.text_input("Email subject", J.get("emailSubject") or "")
-            J["emailBody"] = st.text_area("Email message", J.get("emailBody") or "", height=200)
+            J["custEmail"] = st.text_input(
+                "To",
+                J.get("custEmail") or "",
+                placeholder="customer@email.com",
+                key="email_to_field",
+            )
+            J["emailSubject"] = st.text_input("Subject", J.get("emailSubject") or "")
+            J["emailBody"] = st.text_area("Message", J.get("emailBody") or "", height=200)
             J["emailEdited"] = True
-            if st.button("Reset message"):
-                J["emailEdited"] = False
-                st.rerun()
+
+            to_addr = (J.get("custEmail") or "").strip()
+            subj = J.get("emailSubject") or ""
+            body = J.get("emailBody") or ""
+            mailto = f"mailto:{quote(to_addr)}?subject={quote(subj)}&body={quote(body)}"
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.link_button(
+                    "Open email app",
+                    mailto,
+                    use_container_width=True,
+                    type="primary",
+                    help="Opens Outlook, Apple Mail, Gmail app, etc. with this message ready to send.",
+                )
+            with c2:
+                if st.button("Copy message", use_container_width=True):
+                    st.session_state["_copied_msg"] = f"To: {to_addr}\nSubject: {subj}\n\n{body}"
+                    st.toast("Message ready — select and copy from the box below if needed.")
+            with c3:
+                if st.button("Reset template", use_container_width=True):
+                    J["emailEdited"] = False
+                    st.rerun()
+
+            if not to_addr:
+                st.caption("Tip: enter the customer email above so the “To” field is filled automatically.")
+
+            if st.session_state.get("_copied_msg"):
+                st.code(st.session_state["_copied_msg"], language=None)
 
     with preview:
         with st.container(border=True):
