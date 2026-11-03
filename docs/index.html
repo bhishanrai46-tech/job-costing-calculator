@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Job Costing & Quotation Calculator</title>
+  <meta name="description" content="Cost a job, price it to your target margin, manage a job library, and generate professional quotes or tax invoices as PDF. Free desktop app for Windows, macOS and Linux." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0f1b2d;
+      --card: #18283f;
+      --accent: #2457e6;
+      --accent-hover: #1b47c4;
+      --text: #e8eef8;
+      --muted: #93a4bb;
+      --good: #12a266;
+      --line: #263a52;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: Inter, system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+    a { color: #7eb0ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+    header {
+      padding: 48px 0 32px;
+      border-bottom: 1px solid var(--line);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 28px;
+    }
+    .logo {
+      width: 44px; height: 44px;
+      background: var(--accent);
+      border-radius: 10px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: flex-start;
+      padding-left: 10px;
+      gap: 5px;
+    }
+    .logo span {
+      display: block;
+      height: 3px;
+      background: white;
+      border-radius: 2px;
+    }
+    .logo span:nth-child(1) { width: 22px; }
+    .logo span:nth-child(2) { width: 16px; }
+    .logo span:nth-child(3) { width: 10px; }
+    h1 {
+      font-size: 2.4rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.2;
+      margin-bottom: 12px;
+    }
+    .tagline {
+      font-size: 1.15rem;
+      color: var(--muted);
+      max-width: 560px;
+      margin-bottom: 28px;
+    }
+    .cta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 22px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      border: none;
+      cursor: pointer;
+      text-decoration: none;
+      transition: background 0.15s;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+    }
+    .btn-primary:hover {
+      background: var(--accent-hover);
+      text-decoration: none;
+      color: white;
+    }
+    .btn-secondary {
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid var(--line);
+    }
+    .btn-secondary:hover {
+      background: #1f3453;
+      text-decoration: none;
+      color: var(--text);
+    }
+    section { padding: 48px 0; }
+    h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin-bottom: 20px;
+      letter-spacing: -0.02em;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 22px;
+    }
+    .card h3 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .card p {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    .steps {
+      counter-reset: step;
+      list-style: none;
+    }
+    .steps li {
+      position: relative;
+      padding-left: 48px;
+      margin-bottom: 22px;
+    }
+    .steps li::before {
+      counter-increment: step;
+      content: counter(step);
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 32px; height: 32px;
+      background: var(--accent);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 0.9rem;
+    }
+    .steps strong { display: block; margin-bottom: 4px; }
+    .steps code, pre code {
+      background: #0a1220;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 0.88em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    pre {
+      background: #0a1220;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin-top: 8px;
+      font-size: 0.9rem;
+    }
+    footer {
+      border-top: 1px solid var(--line);
+      padding: 28px 0 40px;
+      color: var(--muted);
+      font-size: 0.9rem;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .badge {
+      display: inline-block;
+      background: #0f7a4b22;
+      color: var(--good);
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 999px;
+      margin-bottom: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <div class="logo">
+          <span></span><span></span><span></span>
+        </div>
+        <div>
+          <div style="font-weight:700;font-size:1.05rem">Job Costing</div>
+          <div style="color:var(--muted);font-size:0.85rem">Quotation Calculator</div>
+        </div>
+      </div>
+      <div class="badge">Free · Open source · 100% local</div>
+      <h1>Price jobs properly.<br />Send professional quotes.</h1>
+      <p class="tagline">
+        A desktop app for cleaners, trades and service businesses.
+        Cost the real work, apply overhead and margin, then export a clean quote or tax invoice as PDF.
+      </p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/bhishanrai46-tech/job-costing-calculator">View on GitHub</a>
+        <a class="btn btn-secondary" href="https://github.com/bhishanrai46-tech/job-costing-calculator/blob/main/job_costing_app.py">Get the app</a>
+      </div>
+    </header>
+
+    <section>
+      <h2>What it does</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Accurate costing</h3>
+          <p>Labour, travel time, vehicle km, materials, other costs and overhead (percent or per hour).</p>
+        </div>
+        <div class="card">
+          <h3>Smart pricing</h3>
+          <p>Target margin, minimum price, rounding, and a live “gut feel vs recommended” comparison.</p>
+        </div>
+        <div class="card">
+          <h3>Job library</h3>
+          <p>Save, search, load, duplicate and delete jobs. Never lose a quote again.</p>
+        </div>
+        <div class="card">
+          <h3>Professional PDFs</h3>
+          <p>Clean A4 quotes and tax invoices with deposit, payment terms and your branding.</p>
+        </div>
+        <div class="card">
+          <h3>Fully private</h3>
+          <p>Everything stays on your computer. No account, no cloud, nothing is sent anywhere.</p>
+        </div>
+        <div class="card">
+          <h3>Cross-platform</h3>
+          <p>Works on Windows, macOS and Linux. One Python file + optional ReportLab for PDF.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Install & run</h2>
+      <ol class="steps">
+        <li>
+          <strong>Install Python 3.9+</strong>
+          Download from <a href="https://www.python.org/downloads/">python.org</a> if you don’t already have it.
+        </li>
+        <li>
+          <strong>Install the PDF library</strong> (only needed for export)
+          <pre><code>pip install reportlab</code></pre>
+        </li>
+        <li>
+          <strong>Download and run</strong>
+          <pre><code>python job_costing_app.py</code></pre>
+          Or clone the repo and run from there.
+        </li>
+      </ol>
+      <p style="color:var(--muted);margin-top:8px">
+        Data is saved automatically in <code>~/.job_costing/data.json</code>. Use File → Export backup to keep a safe copy.
+      </p>
+    </section>
+
+    <section>
+      <h2>Keyboard shortcuts</h2>
+      <div class="grid">
+        <div class="card"><h3>Ctrl + N</h3><p>New blank job</p></div>
+        <div class="card"><h3>Ctrl + S</h3><p>Save current job to library</p></div>
+        <div class="card"><h3>Ctrl + L</h3><p>Open job library</p></div>
+        <div class="card"><h3>Ctrl + P</h3><p>Save PDF</p></div>
+        <div class="card"><h3>Ctrl + E</h3><p>Open email draft</p></div>
+        <div class="card"><h3>Ctrl + ,</h3><p>Business settings</p></div>
+      </div>
+    </section>
+
+    <footer>
+      <div>
+        MIT License · Free to use, modify and share<br />
+        <a href="https://github.com/bhishanrai46-tech/job-costing-calculator">github.com/bhishanrai46-tech/job-costing-calculator</a>
+      </div>
+      <div>Built for people who price real work.</div>
+    </footer>
+  </div>
+</body>
+</html>
