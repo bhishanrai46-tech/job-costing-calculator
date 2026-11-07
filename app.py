@@ -1216,124 +1216,296 @@ def page_job():
 
 
 def render_doc_preview(m: Dict) -> str:
-    """HTML preview that mirrors the PDF layout."""
-    biz = "".join(f"<div class='pv-muted'>{_esc(x)}</div>" for x in m.get("bizLines") or [])
-    bill = "".join(f"<div class='pv-muted'>{_esc(x)}</div>" for x in m.get("billLines") or [])
+    """Professional HTML preview matching the PDF."""
+    biz = "".join(f"<div class='pv-line'>{_esc(x)}</div>" for x in m.get("bizLines") or [])
+    bill = "".join(f"<div class='pv-line'>{_esc(x)}</div>" for x in m.get("billLines") or [])
     meta_rows = "".join(
-        f"<div class='pv-meta-row'><span class='pv-muted'>{_esc(k)}</span>"
-        f"<span class='pv-meta-val'>{_esc(v)}</span></div>"
+        f"<div class='pv-meta-row'><span>{_esc(k)}</span><strong>{_esc(v)}</strong></div>"
         for k, v in (m.get("meta") or [])
     )
-    lines = "".join(
-        f"<tr><td>{_esc(d)}</td><td class='pv-amt'>{_esc(a)}</td></tr>"
+    lines_html = "".join(
+        f"<tr><td class='pv-desc'>{_esc(d)}</td><td class='pv-amt'>{_esc(a)}</td></tr>"
         for d, a in (m.get("lines") or [])
     )
     totals = ""
     for label, val, strong in m.get("totals") or []:
-        cls = "pv-tot strong" if strong else "pv-tot"
-        totals += f"<div class='{cls}'><span>{_esc(label)}</span><span>{_esc(val)}</span></div>"
+        if strong:
+            totals += (
+                f"<div class='pv-tot pv-tot-strong'><span>{_esc(label)}</span>"
+                f"<span>{_esc(val)}</span></div>"
+            )
+        else:
+            totals += (
+                f"<div class='pv-tot'><span>{_esc(label)}</span>"
+                f"<span>{_esc(val)}</span></div>"
+            )
     hl = ""
     if m.get("highlight"):
         hl = (
             f"<div class='pv-hl'><span>{_esc(m['highlight'][0])}</span>"
-            f"<span class='pv-hl-amt'>{_esc(m['highlight'][1])}</span></div>"
+            f"<strong>{_esc(m['highlight'][1])}</strong></div>"
         )
     pay = ""
     if m.get("payment"):
         pay = (
-            f"<div class='pv-pay-label'>PAYMENT DETAILS</div>"
-            f"<div class='pv-pay'>{_esc(m['payment']).replace(chr(10), '<br/>')}</div>"
+            f"<div class='pv-section-label'>Payment details</div>"
+            f"<div class='pv-pay'>{_esc(m['payment']).replace(chr(10), '<br>')}</div>"
         )
-    notes = "".join(f"<div class='pv-note'>{_esc(n)}</div>" for n in (m.get("notes") or []))
+    notes = "".join(f"<p class='pv-note'>{_esc(n)}</p>" for n in (m.get("notes") or []))
     scope = ""
     if m.get("scope"):
-        scope = f"<div class='pv-scope'>{_esc(m['scope']).replace(chr(10), '<br/>')}</div>"
+        scope = f"<p class='pv-scope'>{_esc(m['scope']).replace(chr(10), '<br>')}</p>"
 
     return f"""
 <style>
-.pv-sheet {{
-  background:#fff; border:1px solid #DDE3EC; border-radius:2px;
-  max-width:520px; margin:0 auto; font-family:Inter,Segoe UI,system-ui,sans-serif;
-  color:#111C2E; font-size:13px; line-height:1.45; overflow:hidden;
-  box-shadow:0 1px 3px rgba(15,27,45,0.06);
-}}
-.pv-band {{ height:6px; background:#2457E6; }}
-.pv-pad {{ padding:28px 32px 24px; }}
-.pv-top {{ display:flex; justify-content:space-between; gap:16px; margin-bottom:18px; }}
-.pv-biz {{ font-size:17px; font-weight:700; letter-spacing:-0.02em; margin-bottom:4px; }}
-.pv-muted {{ color:#66758A; font-size:12px; }}
-.pv-doc-title {{ font-size:22px; font-weight:700; letter-spacing:0.02em; text-align:right; }}
-.pv-doc-num {{ color:#66758A; font-size:13px; text-align:right; margin-top:2px; }}
-.pv-rule {{ border:none; border-top:1px solid #DDE3EC; margin:14px 0; }}
-.pv-cols {{ display:flex; justify-content:space-between; gap:20px; margin-bottom:16px; }}
-.pv-bill-label {{ font-size:10px; font-weight:700; letter-spacing:0.06em; color:#66758A; text-transform:uppercase; margin-bottom:4px; }}
-.pv-bill-name {{ font-size:14px; font-weight:700; margin-bottom:2px; }}
-.pv-meta-row {{ display:flex; justify-content:space-between; gap:24px; font-size:12px; margin-bottom:3px; min-width:160px; }}
-.pv-meta-val {{ font-weight:600; text-align:right; }}
-.pv-job {{ font-size:15px; font-weight:700; margin:4px 0 4px; }}
-.pv-scope {{ color:#66758A; font-size:12px; margin-bottom:14px; }}
-.pv-table {{ width:100%; border-collapse:collapse; margin-bottom:12px; }}
-.pv-table th {{
-  background:#F6F8FB; color:#66758A; font-size:10px; font-weight:700;
-  letter-spacing:0.05em; text-transform:uppercase; text-align:left;
-  padding:8px 10px; border-bottom:1px solid #DDE3EC;
-}}
-.pv-table th:last-child {{ text-align:right; }}
-.pv-table td {{ padding:10px; border-bottom:1px solid #DDE3EC; font-size:13px; }}
-.pv-amt {{ text-align:right; font-weight:600; white-space:nowrap; }}
-.pv-tot {{
-  display:flex; justify-content:flex-end; gap:48px; font-size:13px;
-  padding:4px 0; color:#66758A;
-}}
-.pv-tot span:last-child {{ min-width:90px; text-align:right; color:#111C2E; font-weight:500; }}
-.pv-tot.strong {{
-  color:#111C2E; font-weight:700; font-size:14px;
-  border-top:1px solid #DDE3EC; margin-top:4px; padding-top:8px;
-}}
-.pv-tot.strong span:last-child {{ font-weight:700; }}
-.pv-hl {{
-  margin:12px 0 8px auto; max-width:240px; background:#2457E6; color:#fff;
-  border-radius:4px; padding:10px 14px; display:flex; justify-content:space-between;
-  align-items:center; font-size:13px; font-weight:500;
-}}
-.pv-hl-amt {{ font-size:16px; font-weight:700; }}
-.pv-pay-label {{ font-size:10px; font-weight:700; letter-spacing:0.06em; color:#66758A; margin:14px 0 4px; }}
-.pv-pay {{ font-size:12px; white-space:pre-wrap; margin-bottom:8px; }}
-.pv-note {{ color:#66758A; font-size:12px; margin-top:4px; }}
+  .pv-wrap {{
+    background: linear-gradient(180deg, #eef1f6 0%, #e4e9f0 100%);
+    padding: 20px 16px 28px;
+    border-radius: 8px;
+    border: 1px solid #d5dbe6;
+  }}
+  .pv-sheet {{
+    background: #fff;
+    max-width: 480px;
+    margin: 0 auto;
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    color: #0f1b2d;
+    font-size: 12.5px;
+    line-height: 1.5;
+    border-radius: 2px;
+    overflow: hidden;
+    box-shadow:
+      0 0 0 1px rgba(15,27,45,0.06),
+      0 8px 24px rgba(15,27,45,0.08),
+      0 2px 6px rgba(15,27,45,0.04);
+  }}
+  .pv-band {{ height: 5px; background: linear-gradient(90deg, #1b47c4, #2457e6 40%, #3b7af0); }}
+  .pv-body {{ padding: 26px 28px 22px; }}
+  .pv-header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 20px;
+    margin-bottom: 4px;
+  }}
+  .pv-biz-name {{
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    color: #0f1b2d;
+    margin: 0 0 6px;
+  }}
+  .pv-line {{ color: #5c6b80; font-size: 11.5px; line-height: 1.45; }}
+  .pv-doc-title {{
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-align: right;
+    color: #0f1b2d;
+    margin: 0;
+    line-height: 1.15;
+  }}
+  .pv-doc-num {{
+    color: #5c6b80;
+    font-size: 12px;
+    text-align: right;
+    margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }}
+  .pv-divider {{
+    height: 1px;
+    background: #e4e9f0;
+    margin: 16px 0;
+    border: none;
+  }}
+  .pv-two-col {{
+    display: flex;
+    justify-content: space-between;
+    gap: 28px;
+    margin-bottom: 18px;
+  }}
+  .pv-label {{
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #7a8ba0;
+    margin: 0 0 5px;
+  }}
+  .pv-bill-name {{
+    font-size: 13.5px;
+    font-weight: 700;
+    color: #0f1b2d;
+    margin: 0 0 3px;
+  }}
+  .pv-meta {{ min-width: 168px; }}
+  .pv-meta-row {{
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    font-size: 11.5px;
+    margin-bottom: 5px;
+    color: #5c6b80;
+  }}
+  .pv-meta-row strong {{
+    color: #0f1b2d;
+    font-weight: 600;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }}
+  .pv-job {{
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #0f1b2d;
+    margin: 0 0 4px;
+  }}
+  .pv-scope {{
+    color: #5c6b80;
+    font-size: 11.5px;
+    margin: 0 0 16px;
+    line-height: 1.5;
+  }}
+  .pv-table {{
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 8px;
+  }}
+  .pv-table thead th {{
+    background: #f4f6f9;
+    color: #7a8ba0;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    text-align: left;
+    padding: 9px 12px;
+    border-bottom: 1px solid #e4e9f0;
+  }}
+  .pv-table thead th:last-child {{ text-align: right; }}
+  .pv-table tbody td {{
+    padding: 11px 12px;
+    border-bottom: 1px solid #eef1f5;
+    vertical-align: top;
+  }}
+  .pv-desc {{ color: #0f1b2d; font-size: 12.5px; }}
+  .pv-amt {{
+    text-align: right;
+    font-weight: 600;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    color: #0f1b2d;
+    font-size: 12.5px;
+  }}
+  .pv-totals {{ margin-top: 6px; padding-right: 4px; }}
+  .pv-tot {{
+    display: flex;
+    justify-content: flex-end;
+    align-items: baseline;
+    gap: 40px;
+    font-size: 12px;
+    padding: 5px 8px;
+    color: #5c6b80;
+  }}
+  .pv-tot span:last-child {{
+    min-width: 88px;
+    text-align: right;
+    color: #0f1b2d;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }}
+  .pv-tot-strong {{
+    color: #0f1b2d;
+    font-weight: 700;
+    font-size: 13px;
+    margin-top: 2px;
+    padding-top: 10px;
+    border-top: 1.5px solid #0f1b2d;
+  }}
+  .pv-tot-strong span:last-child {{ font-weight: 700; font-size: 13.5px; }}
+  .pv-hl {{
+    margin: 14px 0 4px auto;
+    max-width: 230px;
+    background: linear-gradient(135deg, #1b47c4 0%, #2457e6 100%);
+    color: #fff;
+    border-radius: 5px;
+    padding: 11px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+    font-weight: 500;
+    box-shadow: 0 2px 8px rgba(36, 87, 230, 0.28);
+  }}
+  .pv-hl strong {{
+    font-size: 15px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }}
+  .pv-section-label {{
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #7a8ba0;
+    margin: 18px 0 6px;
+  }}
+  .pv-pay {{
+    font-size: 11.5px;
+    color: #0f1b2d;
+    line-height: 1.55;
+    margin-bottom: 4px;
+  }}
+  .pv-notes {{ margin-top: 4px; }}
+  .pv-note {{
+    color: #5c6b80;
+    font-size: 11.5px;
+    margin: 0 0 5px;
+    line-height: 1.45;
+  }}
 </style>
-<div class="pv-sheet">
-  <div class="pv-band"></div>
-  <div class="pv-pad">
-    <div class="pv-top">
-      <div>
-        <div class="pv-biz">{_esc(m.get("bizName") or "")}</div>
-        {biz}
+<div class="pv-wrap">
+  <div class="pv-sheet">
+    <div class="pv-band"></div>
+    <div class="pv-body">
+      <div class="pv-header">
+        <div>
+          <p class="pv-biz-name">{_esc(m.get("bizName") or "")}</p>
+          {biz}
+        </div>
+        <div>
+          <p class="pv-doc-title">{_esc((m.get("title") or "").upper())}</p>
+          <div class="pv-doc-num">{_esc(m.get("number") or "")}</div>
+        </div>
       </div>
-      <div>
-        <div class="pv-doc-title">{_esc((m.get("title") or "").upper())}</div>
-        <div class="pv-doc-num">{_esc(m.get("number") or "")}</div>
+      <hr class="pv-divider"/>
+      <div class="pv-two-col">
+        <div>
+          <p class="pv-label">{_esc(m.get("billLabel") or "")}</p>
+          <p class="pv-bill-name">{_esc(m.get("billName") or "")}</p>
+          {bill}
+        </div>
+        <div class="pv-meta">{meta_rows}</div>
       </div>
+      <p class="pv-job">{_esc(m.get("jobTitle") or "")}</p>
+      {scope}
+      <table class="pv-table">
+        <thead>
+          <tr>
+            <th>Description</th>
+            <th>Amount ({_esc(m.get("currency") or "AUD")})</th>
+          </tr>
+        </thead>
+        <tbody>{lines_html}</tbody>
+      </table>
+      <div class="pv-totals">{totals}</div>
+      {hl}
+      {pay}
+      <hr class="pv-divider"/>
+      <div class="pv-notes">{notes}</div>
     </div>
-    <hr class="pv-rule"/>
-    <div class="pv-cols">
-      <div>
-        <div class="pv-bill-label">{_esc(m.get("billLabel") or "")}</div>
-        <div class="pv-bill-name">{_esc(m.get("billName") or "")}</div>
-        {bill}
-      </div>
-      <div>{meta_rows}</div>
-    </div>
-    <div class="pv-job">{_esc(m.get("jobTitle") or "")}</div>
-    {scope}
-    <table class="pv-table">
-      <thead><tr><th>Description</th><th>Amount ({_esc(m.get("currency") or "AUD")})</th></tr></thead>
-      <tbody>{lines}</tbody>
-    </table>
-    {totals}
-    {hl}
-    {pay}
-    <hr class="pv-rule"/>
-    {notes}
   </div>
 </div>
 """
