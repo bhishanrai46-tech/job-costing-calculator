@@ -1,339 +1,425 @@
+#!/usr/bin/env python3
 """
-Job Costing & Quotation Calculator  (web app, Streamlit)
+Job Costing & Quotation Calculator — Streamlit edition
 
-Cost a job, price it to your target margin, track quotes and invoices, and
-download a PDF to send to the customer.
+Cost a job, price it to your target margin, manage a simple job library,
+and download a professional quote or tax invoice as PDF.
 
-Run locally:   pip install -r requirements.txt   then   streamlit run app.py
-Deploy:        push to GitHub and deploy on Streamlit Community Cloud (main file: app.py)
-
-Streamlit Cloud does not keep files between visits, so your data lives in the
-browser session. Use "Download backup" in the sidebar and "Restore backup" next time.
+Run locally:  streamlit run app.py
+Deploy:       push to GitHub and connect at share.streamlit.io
 """
-import base64
-import copy
+
+from __future__ import annotations
+
 import datetime as dt
+import io
 import json
 import math
-import os
-import tempfile
 import uuid
+from copy import deepcopy
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import streamlit as st
 
-LOGO_FILE = None  # per-session logo file is set in the UI
+# Optional PDF (graceful if missing)
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import simpleSplit
+    from reportlab.pdfgen import canvas
+    HAS_REPORTLAB = True
+except ImportError:
+    HAS_REPORTLAB = False
 
-PRICING_KEYS = ["currency", "labourRate", "overheadMode", "overheadPct", "overheadHourly", "margin", "minPrice",
-                "roundTo", "travelRate", "taxOn", "taxName", "taxRate", "validDays", "depositPct", "payTerms"]
-QUOTE_STATUSES = ["Draft", "Sent", "Accepted", "Declined"]
-INVOICE_STATUSES = ["Draft", "Sent", "Paid"]
+# ---------------------------------------------------------------------------
+# Constants & pure helpers (shared with desktop version)
+# ---------------------------------------------------------------------------
 
+APP_VERSION = "2.0-streamlit"
 
-def today():
-    return dt.date.today()
+SYMBOLS = {
+    "AUD": "$", "NZD": "$", "USD": "$", "CAD": "$",
+    "GBP": "£", "EUR": "€", "JPY": "¥", "SGD": "$",
+    "HKD": "$", "CHF": "CHF ", "INR": "₹",
+}
 
-
-def default_settings():
-    return {
-        "bizName": "Example Cleaning Co.", "abn": "00 000 000 000", "phone": "0400 000 000",
-        "bizEmail": "accounts@example.com.au", "address": "1 Example Street\nSydney NSW 2000",
-        "currency": "AUD", "labourRate": 38, "overheadMode": "percent", "overheadPct": 15,
-        "overheadHourly": 6, "margin": 25, "minPrice": 150, "roundTo": 5, "travelRate": 0.88,
-        "taxOn": True, "taxName": "GST", "taxRate": 10, "validDays": 30, "depositPct": 20,
-        "payTerms": 14,
-        "payDetails": "Account name: Example Cleaning Co.\nBSB: 000-000\nAccount number: 0000 0000",
-        "docNote": "Thank you for your business.",
-        "quotePrefix": "Q-", "nextQuote": 1001, "invoicePrefix": "INV-", "nextInvoice": 1001,
-    }
-
-
-def job_defaults():
-    now = dt.datetime.now().isoformat(timespec="seconds")
-    return {
-        "id": uuid.uuid4().hex[:8], "status": "Draft", "created": now, "updated": now, "paidDate": "", "snap": None,
-        "docType": "quote", "quoteNo": "", "invoiceNo": "", "issueDate": today().isoformat(), "paid": 0,
-        "custEmail": "", "custPhone": "", "custAddress": "", "itemised": False, "emailEdited": False,
-        "emailSubject": "", "emailBody": "", "sample": False, "title": "", "client": "", "scope": "",
-        "people": 1, "hours": 0, "km": 0, "travelHours": 0, "materials": [], "other": [], "gut": 0,
-    }
+SEG_COLORS = {
+    "labour": "#2457E6",
+    "travel": "#0E8A8A",
+    "materials": "#C27A0E",
+    "other": "#7A4FBF",
+    "overhead": "#8393A3",
+    "profit": "#12A266",
+}
 
 
-def sample_job():
-    j = job_defaults()
-    j.update({
-        "sample": True, "title": "End-of-lease clean, 3-bed unit", "client": "Sample Customer",
-        "custEmail": "customer@example.com", "custPhone": "0411 000 000", "custAddress": "12 Sample Road\nSydney NSW 2000",
-        "scope": "Full interior clean to bond-return standard: kitchen, bathrooms, floors, "
-                 "windows (inside) and wardrobes.\nCarpet steam cleaning is not included.",
-        "people": 2, "hours": 3, "km": 18, "travelHours": 0.5,
-        "materials": [{"d": "Cleaning products", "q": 1, "c": 18},
-                      {"d": "Consumables (cloths, bags, sponges)", "q": 1, "c": 12}],
-        "gut": 250,
-    })
-    return j
+def today_stamp() -> str:
+    return dt.date.today().strftime("%Y%m%d")
 
 
-def starter_templates():
-    def t(name, title, scope, people, hours, km, th, mats, other=None):
-        return {"id": uuid.uuid4().hex[:8], "name": name, "title": title, "scope": scope, "people": people,
-                "hours": hours, "km": km, "travelHours": th,
-                "materials": [{"d": d, "q": q, "c": c} for d, q, c in mats],
-                "other": [{"d": d, "a": a} for d, a in (other or [])]}
-    return [
-        t("End-of-lease clean (3-bed)", "End-of-lease clean", "Full interior clean to bond-return standard.", 2, 3, 18, 0.5,
-          [("Cleaning products", 1, 18), ("Consumables", 1, 12)]),
-        t("Interior paint, one room", "Interior repaint, one room", "Prepare, patch, two coats on walls and ceiling. Furniture moved and covered.", 1, 8, 20, 0.5,
-          [("Paint, 10 L", 1, 120), ("Rollers, tape, drop sheets", 1, 35)]),
-        t("Lawn mow and edge", "Lawn mow and edge", "Mow, edge and blow clean. Green waste removed.", 1, 1.5, 10, 0.25,
-          [("Fuel and line", 1, 8)]),
-        t("Handyman half-day", "Handyman, half day", "Up to four hours of general repairs and fixing.", 1, 4, 15, 0.5,
-          [("Fixings and small parts", 1, 25)]),
-    ]
+def now_iso() -> str:
+    return dt.datetime.now().replace(microsecond=0).isoformat()
 
 
-def assign_quote_no(S, J):
-    J["quoteNo"] = "%s%d" % (S.get("quotePrefix", "Q-"), int(num(S.get("nextQuote")) or 1001))
-    S["nextQuote"] = int(num(S.get("nextQuote")) or 1001) + 1
+def new_id() -> str:
+    return str(uuid.uuid4())
 
 
-def assign_invoice_no(S, J):
-    J["invoiceNo"] = "%s%d" % (S.get("invoicePrefix", "INV-"), int(num(S.get("nextInvoice")) or 1001))
-    S["nextInvoice"] = int(num(S.get("nextInvoice")) or 1001) + 1
-
-
-def new_job(S, base=None):
-    j = job_defaults()
-    if base:
-        j.update(copy.deepcopy(base))
-    assign_quote_no(S, j)
-    return j
-
-
-def eff_settings(S, J):
-    e = dict(S)
-    if J.get("snap"):
-        e.update(J["snap"])
-    return e
-
-
-def take_snap(S):
-    return {k: S.get(k) for k in PRICING_KEYS}
-
-
-# ---------------------------------------------------------------- maths
-
-
-def num(v):
+def num(v: Any) -> float:
     try:
-        x = float(str(v).replace(",", "").replace("$", "").strip())
+        x = float(str(v).replace(",", "").replace("$", "").replace("£", "").replace("€", "").strip())
         return x if math.isfinite(x) else 0.0
     except (TypeError, ValueError):
         return 0.0
 
 
-def is_num(v):
-    s = str(v).replace(",", "").replace("$", "").strip()
-    if s == "":
-        return True
-    try:
-        return math.isfinite(float(s)) and float(s) >= 0
-    except ValueError:
-        return False
-
-
-def pos(v):
+def pos(v: Any) -> float:
     return max(0.0, num(v))
 
 
-def r2(x):
+def r2(x: float) -> float:
     return math.floor(x * 100 + 0.5) / 100
 
 
-def calc(s, j):
-    people, hours, rate = pos(j.get("people")), pos(j.get("hours")), pos(s.get("labourRate"))
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def lines_of(text: Any) -> List[str]:
+    return [x.strip() for x in str(text or "").splitlines() if x.strip()]
+
+
+def parse_date(text: Any) -> dt.date:
+    s = str(text or "").strip()
+    if not s:
+        return dt.date.today()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y/%m/%d"):
+        try:
+            return dt.datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    try:
+        return dt.date.fromisoformat(s)
+    except ValueError:
+        return dt.date.today()
+
+
+def fmt_date(d: dt.date) -> str:
+    return f"{d.day} {d.strftime('%B %Y')}"
+
+
+def money(s: Dict, v: float) -> str:
+    sym = SYMBOLS.get(str(s.get("currency", "AUD")).upper(), "$")
+    return ("-" if v < 0 else "") + sym + f"{abs(v):,.2f}"
+
+
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+
+def default_settings() -> Dict:
+    return {
+        "bizName": "Example Cleaning Co.",
+        "abn": "00 000 000 000",
+        "phone": "0400 000 000",
+        "bizEmail": "accounts@example.com.au",
+        "address": "1 Example Street\nSydney NSW 2000",
+        "currency": "AUD",
+        "labourRate": 38.0,
+        "overheadMode": "percent",
+        "overheadPct": 15.0,
+        "overheadHourly": 6.0,
+        "margin": 25.0,
+        "minPrice": 150.0,
+        "roundTo": 5.0,
+        "travelRate": 0.88,
+        "taxOn": True,
+        "taxName": "GST",
+        "taxRate": 10.0,
+        "validDays": 30,
+        "depositPct": 20.0,
+        "payTerms": 14,
+        "payDetails": (
+            "Account name: Example Cleaning Co.\n"
+            "BSB: 000-000\n"
+            "Account number: 0000 0000"
+        ),
+        "docNote": "Thank you for your business.",
+    }
+
+
+def doc_defaults() -> Dict:
+    return {
+        "docType": "quote",
+        "quoteNo": "Q-" + today_stamp(),
+        "invoiceNo": "INV-" + today_stamp(),
+        "issueDate": dt.date.today().isoformat(),
+        "paid": 0.0,
+        "custEmail": "",
+        "custAddress": "",
+        "itemised": False,
+        "emailEdited": False,
+        "emailSubject": "",
+        "emailBody": "",
+    }
+
+
+def sample_job() -> Dict:
+    j = doc_defaults()
+    j.update({
+        "id": new_id(),
+        "sample": True,
+        "title": "End-of-lease clean, 3-bed unit",
+        "client": "Sample Customer",
+        "custEmail": "customer@example.com",
+        "custAddress": "12 Sample Road\nSydney NSW 2000",
+        "scope": (
+            "Full interior clean to bond-return standard: kitchen, bathrooms, floors, "
+            "windows (inside) and wardrobes.\nCarpet steam cleaning is not included."
+        ),
+        "people": 2,
+        "hours": 3.0,
+        "km": 18.0,
+        "travelHours": 0.5,
+        "materials": [
+            {"d": "Cleaning products", "q": 1, "c": 18},
+            {"d": "Consumables (cloths, bags, sponges)", "q": 1, "c": 12},
+        ],
+        "other": [],
+        "gut": 250.0,
+        "saved_at": now_iso(),
+        "library_name": "",
+    })
+    return j
+
+
+def blank_job() -> Dict:
+    j = doc_defaults()
+    j.update({
+        "id": new_id(),
+        "sample": False,
+        "title": "",
+        "client": "",
+        "scope": "",
+        "people": 1,
+        "hours": 0.0,
+        "km": 0.0,
+        "travelHours": 0.0,
+        "materials": [],
+        "other": [],
+        "gut": 0.0,
+        "saved_at": now_iso(),
+        "library_name": "",
+    })
+    return j
+
+
+# ---------------------------------------------------------------------------
+# Costing engine
+# ---------------------------------------------------------------------------
+
+def calc(s: Dict, j: Dict) -> Dict:
+    people = pos(j.get("people"))
+    hours = pos(j.get("hours"))
+    rate = pos(s.get("labourRate"))
+
     on_site = people * hours
     travel_hours = pos(j.get("travelHours")) * people
     paid_hours = on_site + travel_hours
+
     labour = on_site * rate
     vehicle = pos(j.get("km")) * pos(s.get("travelRate"))
     travel_time = travel_hours * rate
     travel = vehicle + travel_time
-    materials = sum(pos(r.get("q")) * pos(r.get("c")) for r in j.get("materials", []))
-    other = sum(pos(r.get("a")) for r in j.get("other", []))
+
+    materials = sum(pos(r.get("q")) * pos(r.get("c")) for r in j.get("materials", []) or [])
+    other = sum(pos(r.get("a")) for r in j.get("other", []) or [])
     direct = labour + travel + materials + other
+
     if s.get("overheadMode") == "hourly":
         overhead = paid_hours * pos(s.get("overheadHourly"))
     else:
-        overhead = direct * pos(s.get("overheadPct")) / 100
+        overhead = direct * pos(s.get("overheadPct")) / 100.0
+
     cost = direct + overhead
-    target = min(max(num(s.get("margin")), 0), 90) / 100
-    raw = cost / (1 - target) if cost > 0 else 0.0
-    price, rounded, min_applied = raw, False, False
+    target = clamp(num(s.get("margin")), 0.0, 90.0) / 100.0
+    raw = cost / (1.0 - target) if cost > 0 else 0.0
+
+    price = raw
+    rounded = False
+    min_applied = False
+
     step = pos(s.get("roundTo"))
     if step > 0 and price > 0:
         rp = math.ceil(price / step - 1e-9) * step
         rounded = rp > price + 0.004
         price = rp
+
     min_p = pos(s.get("minPrice"))
     if cost > 0 and min_p > price:
-        price, min_applied, rounded = min_p, True, False
+        price = min_p
+        min_applied = True
+        rounded = False
+
     price = r2(price)
     profit = price - cost
     tax_rate = pos(s.get("taxRate")) if s.get("taxOn") else 0.0
-    tax = r2(price * tax_rate / 100)
-    return dict(labour=labour, vehicle=vehicle, travel_time=travel_time, travel=travel,
-                materials=materials, other=other, direct=direct, overhead=overhead, cost=cost,
-                target=target, raw=raw, price=price, rounded=rounded, min_applied=min_applied,
-                profit=profit, margin=(profit / price if price > 0 else 0.0), tax=tax,
-                tax_rate=tax_rate, total=r2(price + tax), on_site=on_site, paid_hours=paid_hours,
-                pph=(profit / paid_hours if paid_hours > 0 else 0.0))
+    tax = r2(price * tax_rate / 100.0)
+    total = r2(price + tax)
+
+    return {
+        "labour": labour,
+        "vehicle": vehicle,
+        "travel_time": travel_time,
+        "travel": travel,
+        "materials": materials,
+        "other": other,
+        "direct": direct,
+        "overhead": overhead,
+        "cost": cost,
+        "target": target,
+        "raw": raw,
+        "price": price,
+        "rounded": rounded,
+        "min_applied": min_applied,
+        "profit": profit,
+        "margin": (profit / price if price > 0 else 0.0),
+        "tax": tax,
+        "tax_rate": tax_rate,
+        "total": total,
+        "on_site": on_site,
+        "paid_hours": paid_hours,
+        "pph": (profit / paid_hours if paid_hours > 0 else 0.0),
+    }
 
 
-def job_calc(S, J):
-    eff = eff_settings(S, J)
-    return calc(eff, J), eff
-
-
-def doc_lines(j, r):
+def doc_lines(j: Dict, r: Dict) -> List[Tuple[str, float]]:
     title = j.get("title") or "Job"
     if not j.get("itemised") or r["direct"] <= 0:
         return [(title, r["price"])]
-    parts = [("Labour and travel", r["labour"] + r["travel"]),
-             ("Materials and supplies", r["materials"]), ("Other costs", r["other"])]
+
+    parts = [
+        ("Labour and travel", r["labour"] + r["travel"]),
+        ("Materials and supplies", r["materials"]),
+        ("Other costs", r["other"]),
+    ]
     parts = [p for p in parts if p[1] > 1e-5]
-    out, total = [], 0.0
+    out: List[Tuple[str, float]] = []
+    total = 0.0
     for i, (name, val) in enumerate(parts):
-        a = r2(r["price"] - total) if i == len(parts) - 1 else r2(r["price"] * val / r["direct"])
+        if i == len(parts) - 1:
+            a = r2(r["price"] - total)
+        else:
+            a = r2(r["price"] * val / r["direct"])
         total += a
         out.append((name, a))
     return out
 
 
-# ---------------------------------------------------------------- documents
-
-SYMBOLS = {"AUD": "$", "NZD": "$", "USD": "$", "CAD": "$", "GBP": "£", "EUR": "€"}
-
-
-def money(s, v):
-    sym = SYMBOLS.get(s.get("currency", "AUD"), "$")
-    return ("-" if v < -0.004 else "") + sym + "{:,.2f}".format(abs(v))
-
-
-def fmt_date(d):
-    return "{} {}".format(d.day, d.strftime("%B %Y"))
-
-
-def parse_date(text):
-    try:
-        return dt.date.fromisoformat(str(text).strip())
-    except ValueError:
-        return today()
-
-
-def valid_date(text):
-    try:
-        dt.date.fromisoformat(str(text).strip())
-        return True
-    except ValueError:
-        return False
-
-
-def lines_of(text):
-    return [x.strip() for x in str(text or "").splitlines() if x.strip()]
-
-
-def due_date(eff, j):
-    return parse_date(j.get("issueDate")) + dt.timedelta(days=int(round(pos(eff.get("payTerms")))))
-
-
-def display_status(eff, j):
-    st = j.get("status", "Draft")
-    if j.get("docType") == "invoice" and st == "Sent" and due_date(eff, j) < today():
-        return "Overdue"
-    return st
-
-
-def build_model(s, j, r):
+def build_model(s: Dict, j: Dict, r: Dict) -> Dict:
     inv = j.get("docType") == "invoice"
     tn = s.get("taxName") or "Tax"
-    cc = s.get("currency", "AUD")
+    cc = str(s.get("currency", "AUD")).upper()
     issue = parse_date(j.get("issueDate"))
-    due = due_date(s, j)
+    due = issue + dt.timedelta(days=int(round(pos(s.get("payTerms")))))
     until = issue + dt.timedelta(days=int(round(pos(s.get("validDays")))))
     paid = pos(j.get("paid")) if inv else 0.0
-    m = {"inv": inv, "currency": cc}
+
+    m: Dict[str, Any] = {"inv": inv, "currency": cc}
     m["title"] = ("Tax invoice" if s.get("taxOn") else "Invoice") if inv else "Quote"
     m["number"] = (j.get("invoiceNo") if inv else j.get("quoteNo")) or ""
     m["bizName"] = s.get("bizName") or "Your business"
+
     biz = []
     if s.get("abn"):
-        biz.append("ABN " + s["abn"])
+        biz.append("ABN " + str(s["abn"]))
     biz += lines_of(s.get("address"))
     if s.get("phone"):
-        biz.append(s["phone"])
+        biz.append(str(s["phone"]))
     if s.get("bizEmail"):
-        biz.append(s["bizEmail"])
+        biz.append(str(s["bizEmail"]))
     m["bizLines"] = biz
-    m["logo"] = LOGO_FILE if LOGO_FILE and os.path.exists(LOGO_FILE) else None
+
     m["billLabel"] = "Bill to" if inv else "Prepared for"
     m["billName"] = j.get("client") or "Customer"
-    m["billLines"] = lines_of(j.get("custAddress")) + [x for x in (j.get("custPhone"), j.get("custEmail")) if x]
+    m["billLines"] = lines_of(j.get("custAddress"))
+    if j.get("custEmail"):
+        m["billLines"].append(str(j["custEmail"]))
+
     if inv:
-        m["meta"] = [("Invoice date", fmt_date(issue)), ("Due date", fmt_date(due))]
+        m["meta"] = [
+            ("Invoice date", fmt_date(issue)),
+            ("Due date", fmt_date(due)),
+        ]
     else:
-        m["meta"] = [("Quote date", fmt_date(issue)),
-                     ("Valid until", fmt_date(until) if pos(s.get("validDays")) > 0 else "No expiry")]
+        m["meta"] = [
+            ("Quote date", fmt_date(issue)),
+            ("Valid until", fmt_date(until) if pos(s.get("validDays")) > 0 else "No expiry"),
+        ]
+
     m["jobTitle"] = j.get("title") or "Untitled job"
     m["scope"] = j.get("scope") or ""
     m["lines"] = [(d, money(s, a)) for d, a in doc_lines(j, r)]
+
     tot = []
     if s.get("taxOn"):
-        tot.append(("Subtotal (excl. %s)" % tn, money(s, r["price"]), False))
-        tot.append(("%s (%g%%)" % (tn, r["tax_rate"]), money(s, r["tax"]), False))
-        tot.append(("Total (incl. %s)" % tn, money(s, r["total"]), True))
+        tot.append((f"Subtotal (excl. {tn})", money(s, r["price"]), False))
+        tot.append((f"{tn} ({r['tax_rate']:g}%)", money(s, r["tax"]), False))
+        tot.append((f"Total (incl. {tn})", money(s, r["total"]), True))
     else:
         tot.append(("Total", money(s, r["total"]), True))
+
     hl = None
     if inv:
         if paid > 0:
             tot.append(("Less amount received", "-" + money(s, paid), False))
-        hl = ("Balance due" if paid > 0 else "Amount due", money(s, max(0.0, r["total"] - paid)))
-        if j.get("status") == "Paid":
-            hl = ("PAID IN FULL", money(s, r["total"]))
+        hl = (
+            "Balance due" if paid > 0 else "Amount due",
+            money(s, max(0.0, r["total"] - paid)),
+        )
     elif pos(s.get("depositPct")) > 0:
-        hl = ("Deposit to book (%g%%)" % pos(s.get("depositPct")),
-              money(s, r["total"] * pos(s.get("depositPct")) / 100))
+        hl = (
+            f"Deposit to book ({pos(s.get('depositPct')):g}%)",
+            money(s, r["total"] * pos(s.get("depositPct")) / 100.0),
+        )
     m["totals"], m["highlight"] = tot, hl
-    m["payment"] = s.get("payDetails") if (inv and s.get("payDetails") and j.get("status") != "Paid") else None
+    m["payment"] = s.get("payDetails") if (inv and s.get("payDetails")) else None
+
     notes = []
     if inv:
-        if j.get("status") != "Paid":
-            notes.append("Payment is due within %d days, by %s." % (round(pos(s.get("payTerms"))), fmt_date(due)))
+        notes.append(
+            f"Payment is due within {round(pos(s.get('payTerms')))} days, by {fmt_date(due)}."
+        )
     else:
         if pos(s.get("depositPct")) > 0:
-            notes.append("A deposit is requested to book the job, with the balance due on completion.")
+            notes.append(
+                "A deposit is requested to book the job, with the balance due on completion."
+            )
         if pos(s.get("validDays")) > 0:
-            notes.append("This quote is valid for %d days, until %s." % (round(pos(s.get("validDays"))), fmt_date(until)))
-    notes.append("All amounts are in %s." % cc)
+            notes.append(
+                f"This quote is valid for {round(pos(s.get('validDays')))} days, "
+                f"until {fmt_date(until)}."
+            )
+    notes.append(f"All amounts are in {cc}.")
     if s.get("docNote"):
-        notes.append(s["docNote"])
+        notes.append(str(s["docNote"]))
     m["notes"] = notes
     return m
 
 
-def model_text(m):
-    L = ["%s %s" % (m["title"].upper(), m["number"]), m["bizName"]] + m["bizLines"] + [""]
-    L.append("%s: %s" % (m["billLabel"], m["billName"]))
-    L += [("%s: %s" % p) for p in m["meta"]]
+def model_text(m: Dict) -> str:
+    L = [f"{m['title'].upper()} {m['number']}", m["bizName"]] + m["bizLines"] + [""]
+    L.append(f"{m['billLabel']}: {m['billName']}")
+    L += [f"{k}: {v}" for k, v in m["meta"]]
     L += ["", m["jobTitle"]]
     if m["scope"]:
         L.append(m["scope"])
     L.append("")
-    L += [("%s: %s" % p) for p in m["lines"]]
-    L += [("%s: %s" % (a, b)) for a, b, _ in m["totals"]]
+    L += [f"{d}: {a}" for d, a in m["lines"]]
+    L += [f"{a}: {b}" for a, b, _ in m["totals"]]
     if m["highlight"]:
-        L.append("%s: %s" % m["highlight"])
+        L.append(f"{m['highlight'][0]}: {m['highlight'][1]}")
     if m["payment"]:
         L += ["", "Payment details:", m["payment"]]
     L.append("")
@@ -341,78 +427,78 @@ def model_text(m):
     return "\n".join(L)
 
 
-def email_template(s, j, m):
+def email_template(s: Dict, j: Dict, m: Dict) -> Tuple[str, str]:
     b = [("Hi %s," % j["client"]) if j.get("client") else "Hi,", ""]
     if m["inv"]:
-        b.append("Please find attached %s %s for %s." % (m["title"].lower(), m["number"], m["jobTitle"]))
+        b.append(
+            f"Please find attached {m['title'].lower()} {m['number']} for {m['jobTitle']}."
+        )
         b.append("")
-        b.append("%s: %s" % m["highlight"])
-        b.append("Due date: %s" % m["meta"][1][1])
+        b.append(f"{m['highlight'][0]}: {m['highlight'][1]}")
+        b.append(f"Due date: {m['meta'][1][1]}")
         if s.get("payDetails"):
-            b += ["", "Payment details:", s["payDetails"]]
+            b += ["", "Payment details:", str(s["payDetails"])]
         b += ["", "Please let me know if you have any questions."]
     else:
         strong = [t for t in m["totals"] if t[2]][0]
-        b.append("Thanks for the opportunity to quote. Please find attached quote %s for %s." % (m["number"], m["jobTitle"]))
+        b.append(
+            f"Thanks for the opportunity to quote. Please find attached quote "
+            f"{m['number']} for {m['jobTitle']}."
+        )
         b.append("")
-        b.append("%s: %s" % (strong[0], strong[1]))
-        b.append("%s: %s" % m["meta"][1])
-        b += ["", "If you are happy to go ahead, just reply to this email and we will lock in a date."]
+        b.append(f"{strong[0]}: {strong[1]}")
+        b.append(f"{m['meta'][1][0]}: {m['meta'][1][1]}")
+        b += [
+            "",
+            "If you are happy to go ahead, just reply to this email and we will lock in a date.",
+        ]
     b += ["", "Kind regards,", m["bizName"]]
     if s.get("phone"):
-        b.append(s["phone"])
-    return "%s %s from %s" % (m["title"], m["number"], m["bizName"]), "\n".join(b)
+        b.append(str(s["phone"]))
+    subject = f"{m['title']} {m['number']} from {m['bizName']}"
+    return subject, "\n".join(b)
 
 
-def make_pdf(m, path):
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-    draw_document(canvas.Canvas(path, pagesize=A4), m)
+def make_pdf_bytes(m: Dict) -> bytes:
+    if not HAS_REPORTLAB:
+        raise RuntimeError("reportlab is not installed")
 
-
-def draw_document(c, m):
-    """Draws a quote or invoice. `c` is a reportlab canvas (for the PDF) or a TkPage (for the on-screen preview),
-    so the preview and the PDF always have the same layout."""
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.lib.utils import simpleSplit
-
+    buf = io.BytesIO()
     W, H = A4
     ML, MR = 18, 192
     ACC = (36 / 255, 87 / 255, 230 / 255)
-    INK, MUT, RULE, SOFT = (15 / 255, 27 / 255, 45 / 255), (95 / 255, 110 / 255, 128 / 255), \
-        (221 / 255, 227 / 255, 235 / 255), (244 / 255, 246 / 255, 249 / 255)
-    c.setTitle("%s %s" % (m["title"], m["number"]))
+    INK = (15 / 255, 27 / 255, 45 / 255)
+    MUT = (95 / 255, 110 / 255, 128 / 255)
+    RULE = (221 / 255, 227 / 255, 235 / 255)
+    SOFT = (244 / 255, 246 / 255, 249 / 255)
+
+    c = canvas.Canvas(buf, pagesize=A4)
+    c.setTitle(f"{m['title']} {m['number']}")
     state = {"y": 0.0, "page": 1}
 
-    def Y(y):
+    def Y(y: float) -> float:
         return H - y * mm
 
-    def font(name, size, color=INK):
+    def font(name: str, size: float, color=INK) -> None:
         c.setFont(name, size)
         c.setFillColorRGB(*color)
 
-    def wrap(text, width_mm, name="Helvetica", size=10):
-        out = []
+    def wrap(text: str, width_mm: float, name: str = "Helvetica", size: float = 10) -> List[str]:
+        out: List[str] = []
         for para in str(text).split("\n"):
             out += simpleSplit(para, name, size, width_mm * mm) or [""]
         return out
 
-    def hr(y):
+    def hr(y: float) -> None:
         c.setStrokeColorRGB(*RULE)
         c.setLineWidth(0.7)
         c.line(ML * mm, Y(y), MR * mm, Y(y))
 
-    def top_band():
+    def top_band() -> None:
         c.setFillColorRGB(*ACC)
         c.rect(0, H - 5 * mm, W, 5 * mm, stroke=0, fill=1)
 
-    def footer():
-        font("Helvetica", 8, MUT)
-        c.drawString(ML * mm, Y(288), "%s  |  %s %s" % (m["bizName"], m["title"], m["number"]))
-        c.drawRightString(MR * mm, Y(288), "Page %d" % state["page"])
-
-    def need(h):
+    def need(h: float) -> None:
         if state["y"] + h > 272:
             footer()
             c.showPage()
@@ -420,7 +506,19 @@ def draw_document(c, m):
             top_band()
             state["y"] = 20
 
-    def text_block(lines, x, lh, name="Helvetica", size=10, color=INK):
+    def footer() -> None:
+        font("Helvetica", 8, MUT)
+        c.drawString(ML * mm, Y(288), f"{m['bizName']}  |  {m['title']} {m['number']}")
+        c.drawRightString(MR * mm, Y(288), f"Page {state['page']}")
+
+    def text_block(
+        lines: List[str],
+        x: float,
+        lh: float,
+        name: str = "Helvetica",
+        size: float = 10,
+        color=INK,
+    ) -> None:
         for ln in lines:
             need(lh)
             font(name, size, color)
@@ -428,25 +526,13 @@ def draw_document(c, m):
             state["y"] += lh
 
     top_band()
-    top_y = 22.0
-    state["y"] = top_y
-    logo_h = 0.0
-    if m.get("logo"):
-        try:
-            from reportlab.lib.utils import ImageReader
-            img = ImageReader(m["logo"])
-            iw, ih = img.getSize()
-            box_w, box_h = 52.0, 17.0
-            scale = min(box_w / iw, box_h / ih)
-            lw, logo_h = iw * scale, ih * scale
-            c.drawImage(img, ML * mm, Y(top_y - 4 + logo_h), width=lw * mm, height=logo_h * mm, mask="auto")
-            state["y"] = top_y - 4 + logo_h + 8
-        except Exception:  # noqa: BLE001
-            logo_h = 0.0
+    state["y"] = 22
+    top_y = state["y"]
     text_block(wrap(m["bizName"], 100, "Helvetica-Bold", 17), ML, 7, "Helvetica-Bold", 17)
     for ln in m["bizLines"]:
         text_block(wrap(ln, 95, "Helvetica", 9.5), ML, 4.6, "Helvetica", 9.5, MUT)
     left_end = state["y"]
+
     font("Helvetica-Bold", 22)
     c.drawRightString(MR * mm, Y(top_y + 1), m["title"].upper())
     font("Helvetica", 10.5, MUT)
@@ -463,6 +549,7 @@ def draw_document(c, m):
     for ln in m["billLines"]:
         text_block(wrap(ln, 85, "Helvetica", 9.5), ML, 4.7, "Helvetica", 9.5, MUT)
     left_y = state["y"]
+
     ry = col_top
     for k, v in m["meta"]:
         font("Helvetica", 9.5, MUT)
@@ -484,8 +571,9 @@ def draw_document(c, m):
     c.rect(ML * mm, Y(state["y"] + 3), (MR - ML) * mm, 8.5 * mm, stroke=0, fill=1)
     font("Helvetica-Bold", 8, MUT)
     c.drawString((ML + 3) * mm, Y(state["y"]), "DESCRIPTION")
-    c.drawRightString((MR - 3) * mm, Y(state["y"]), "AMOUNT (%s)" % m["currency"])
+    c.drawRightString((MR - 3) * mm, Y(state["y"]), f"AMOUNT ({m['currency']})")
     state["y"] += 7
+
     for desc, amt in m["lines"]:
         dl = wrap(desc, 140)
         need(len(dl) * 5 + 6)
@@ -511,6 +599,7 @@ def draw_document(c, m):
         font("Helvetica-Bold" if strong else "Helvetica", 11.5 if strong else 10)
         c.drawRightString(MR * mm, Y(state["y"]), val)
         state["y"] += 7.5
+
     if m["highlight"]:
         state["y"] += 1
         need(16)
@@ -523,6 +612,7 @@ def draw_document(c, m):
         c.drawRightString((MR - 4) * mm, Y(state["y"] + 1.8), m["highlight"][1])
         state["y"] += 14
     state["y"] += 4
+
     if m["payment"]:
         need(22)
         font("Helvetica-Bold", 8, MUT)
@@ -530,6 +620,7 @@ def draw_document(c, m):
         state["y"] += 5.5
         text_block(wrap(m["payment"], 120), ML, 5)
         state["y"] += 3
+
     if m["notes"]:
         need(12)
         hr(state["y"])
@@ -537,462 +628,958 @@ def draw_document(c, m):
         for n in m["notes"]:
             text_block(wrap(n, 174, "Helvetica", 9), ML, 4.6, "Helvetica", 9, MUT)
             state["y"] += 1
+
     footer()
     c.save()
-
-
-# ---------------------------------------------------------------- storage
-
-
-# ---------------------------------------------------------------- state
-
-def blank_store():
-    S = default_settings()
-    j = sample_job()
-    assign_quote_no(S, j)
-    return {"S": S, "jobs": [j], "customers": [], "templates": starter_templates(), "current": j["id"]}
-
-
-def _merge_job(j):
-    base = job_defaults()
-    base.update(j)
-    base.setdefault("materials", [])
-    base.setdefault("other", [])
-    return base
-
-
-def import_store(data):
-    S = default_settings()
-    S.update(data.get("S", {}))
-    jobs = [_merge_job(j) for j in data.get("jobs", []) if isinstance(j, dict)]
-    if not jobs and isinstance(data.get("J"), dict):
-        jobs = [_merge_job(data["J"])]
-    if not jobs:
-        raise ValueError("No jobs found in that file.")
-    for j in jobs:
-        if not j.get("quoteNo"):
-            assign_quote_no(S, j)
-    cur = data.get("current")
-    if cur not in [j["id"] for j in jobs]:
-        cur = jobs[-1]["id"]
-    return {"S": S, "jobs": jobs, "customers": [c for c in data.get("customers", []) if isinstance(c, dict)],
-            "templates": data.get("templates") or starter_templates(), "current": cur}
-
-
-def logo_path():
-    """Writes the saved logo (stored inside the data as base64) to a temp file for the PDF."""
-    b64 = st.session_state.store["S"].get("logoB64")
-    if not b64:
-        return None
-    path = os.path.join(tempfile.gettempdir(), "jc_logo_%s.png" % st.session_state.sid)
-    try:
-        with open(path, "wb") as f:
-            f.write(base64.b64decode(b64))
-        return path
-    except (OSError, ValueError):
-        return None
-
-
-def current_job():
-    st_ = st.session_state.store
-    for j in st_["jobs"]:
-        if j["id"] == st_["current"]:
-            return j
-    st_["current"] = st_["jobs"][0]["id"]
-    return st_["jobs"][0]
-
-
-def touch(j):
-    j["updated"] = dt.datetime.now().isoformat(timespec="seconds")
-
-
-def pdf_bytes(m):
-    import io
-    buf = io.BytesIO()
-    make_pdf(m, buf)
     return buf.getvalue()
 
 
-def pdf_pages_png(data):
-    import pypdfium2 as pdfium
-    pdf = pdfium.PdfDocument(data)
-    out = []
-    for i in range(len(pdf)):
-        img = pdf[i].render(scale=1.6).to_pil()
-        import io
-        b = io.BytesIO()
-        img.save(b, format="PNG")
-        out.append(b.getvalue())
-    return out
+# ---------------------------------------------------------------------------
+# Streamlit session helpers
+# ---------------------------------------------------------------------------
 
 
-def edit_rows(label, rows, cols):
-    """Small table editor for materials / other costs. Returns the cleaned list."""
-    import pandas as pd
-    df = pd.DataFrame(rows if rows else [], columns=[c[0] for c in cols])
-    out = st.data_editor(df, num_rows="dynamic", width="stretch", hide_index=True,
-                         column_config={c[0]: c[1] for c in cols}, key=label)
-    res = []
-    for rec in out.to_dict("records"):
-        d = {c[0]: rec.get(c[0]) for c in cols}
-        if all((v is None or v == "" or (isinstance(v, float) and math.isnan(v))) for v in d.values()):
-            continue
-        for k, v in d.items():
-            if isinstance(v, float) and math.isnan(v):
-                d[k] = "" if k == "d" else 0
-        res.append(d)
-    return res
+# ---------------------------------------------------------------------------
+# Streamlit UI — matched to desktop Tkinter app
+# ---------------------------------------------------------------------------
+
+DESKTOP_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');
+
+:root {
+  --side: #0F1B2D;
+  --side-hover: #18283F;
+  --side-active: #1F3453;
+  --side-fg: #C5D0E0;
+  --side-muted: #7D8EA6;
+  --bg: #F3F5F9;
+  --card: #FFFFFF;
+  --line: #DDE3EC;
+  --field: #C3CDDA;
+  --ink: #111C2E;
+  --muted: #66758A;
+  --accent: #2457E6;
+  --accent-dark: #1B47C4;
+  --soft: #F6F8FB;
+  --good: #0F7A4B;
+  --warn: #8F5200;
+  --bad: #B3261E;
+  --good-bg: #DCF3E7;
+  --warn-bg: #FBEBCF;
+  --bad-bg: #FBE0DD;
+  --neutral-bg: #EEF2F8;
+}
+
+html, body, [class*="css"] {
+  font-family: Inter, "Segoe UI", system-ui, sans-serif !important;
+  color: var(--ink);
+}
+
+.stApp {
+  background: var(--bg) !important;
+}
+
+.block-container {
+  padding-top: 1.25rem !important;
+  padding-bottom: 2.5rem !important;
+  padding-left: 1.75rem !important;
+  padding-right: 1.75rem !important;
+  max-width: 1280px !important;
+}
+
+/* —— Sidebar (match desktop) —— */
+section[data-testid="stSidebar"] {
+  background: var(--side) !important;
+  border-right: none !important;
+  min-width: 232px !important;
+}
+section[data-testid="stSidebar"] > div {
+  background: var(--side) !important;
+  padding-top: 1.25rem !important;
+}
+section[data-testid="stSidebar"] * {
+  color: var(--side-fg) !important;
+}
+section[data-testid="stSidebar"] .stRadio label {
+  font-size: 0.95rem !important;
+  font-weight: 600 !important;
+  padding: 0.55rem 0.4rem !important;
+  border-radius: 0 !important;
+}
+section[data-testid="stSidebar"] .stRadio label:hover {
+  background: var(--side-hover) !important;
+}
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+  color: var(--side-muted) !important;
+}
+section[data-testid="stSidebar"] hr {
+  border-color: #1E3049 !important;
+  margin: 0.75rem 0 !important;
+}
+
+/* —— Typography —— */
+h1 {
+  font-size: 1.55rem !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.03em !important;
+  color: var(--ink) !important;
+  margin: 0 0 0.25rem 0 !important;
+}
+h2, h3, h4, h5 {
+  font-weight: 600 !important;
+  color: var(--ink) !important;
+  letter-spacing: -0.02em !important;
+}
+.stCaption, [data-testid="stCaptionContainer"] {
+  color: var(--muted) !important;
+  font-size: 0.85rem !important;
+}
+
+/* —— Cards —— */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+  background: var(--card) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 4px !important;
+  box-shadow: none !important;
+}
+
+/* —— Price hero (desktop dark panel) —— */
+.hero {
+  background: var(--side);
+  color: #fff;
+  border-radius: 4px;
+  padding: 1.15rem 1.25rem 1rem;
+  margin-bottom: 0.85rem;
+}
+.hero-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #93A4BB;
+  margin-bottom: 0.2rem;
+}
+.hero-price {
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-size: 2.15rem;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  color: #fff;
+}
+.hero-sub {
+  font-size: 0.88rem;
+  color: #93A4BB;
+  margin-top: 0.3rem;
+}
+.hero-flag {
+  font-size: 0.8rem;
+  color: #F0B25C;
+  margin-top: 0.45rem;
+}
+.hero-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem 1rem;
+  margin-top: 0.9rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid #263A52;
+}
+.hero-stat-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #93A4BB;
+}
+.hero-stat-value {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #fff;
+  margin-top: 0.1rem;
+}
+
+/* —— Crumb —— */
+.crumb {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 0.15rem;
+}
+
+/* —— Verdict —— */
+.verdict {
+  border-radius: 4px;
+  padding: 0.75rem 0.9rem;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  margin-top: 0.5rem;
+}
+.verdict strong {
+  display: block;
+  font-weight: 700;
+  margin-bottom: 0.15rem;
+}
+.v-good { background: var(--good-bg); color: var(--good); }
+.v-warn { background: var(--warn-bg); color: var(--warn); }
+.v-bad  { background: var(--bad-bg);  color: var(--bad); }
+.v-neutral { background: var(--neutral-bg); color: var(--ink); }
+
+/* —— Breakdown rows —— */
+.brk {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 0.38rem 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.88rem;
+}
+.brk:last-child { border-bottom: none; }
+.brk .nm { color: var(--ink); }
+.brk .am {
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 500;
+  color: var(--ink);
+}
+.brk .pc {
+  color: var(--muted);
+  font-size: 0.78rem;
+  min-width: 3.1rem;
+  text-align: right;
+  margin-left: 0.45rem;
+}
+.brk.str .nm, .brk.str .am { font-weight: 700; }
+.brk-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 0.45rem;
+  vertical-align: middle;
+}
+
+/* —— Segment bar —— */
+.segbar {
+  display: flex;
+  height: 12px;
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 0.4rem 0 0.75rem;
+  background: var(--soft);
+}
+.segbar > div { height: 100%; }
+
+/* —— Sample banner —— */
+.banner {
+  background: #E8EEFD;
+  color: var(--ink);
+  font-size: 0.88rem;
+  padding: 0.6rem 0.9rem;
+  border-radius: 4px;
+  margin-bottom: 0.85rem;
+  border: 1px solid #D0DBF7;
+}
+
+/* —— Metrics —— */
+div[data-testid="stMetricValue"] {
+  font-family: "JetBrains Mono", monospace !important;
+  font-weight: 600 !important;
+  font-size: 1.15rem !important;
+  color: var(--ink) !important;
+}
+div[data-testid="stMetricLabel"] {
+  color: var(--muted) !important;
+  font-size: 0.72rem !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.04em !important;
+  text-transform: uppercase !important;
+}
+
+/* —— Inputs —— */
+.stTextInput input, .stNumberInput input, .stTextArea textarea {
+  border-radius: 4px !important;
+  border: 1px solid var(--field) !important;
+  font-size: 0.95rem !important;
+}
+.stButton > button {
+  border-radius: 4px !important;
+  font-weight: 600 !important;
+  font-size: 0.88rem !important;
+  border: 1px solid var(--field) !important;
+  background: var(--card) !important;
+  color: var(--ink) !important;
+  padding: 0.4rem 1rem !important;
+}
+.stButton > button[kind="primary"] {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: #fff !important;
+}
+.stButton > button[kind="primary"]:hover {
+  background: var(--accent-dark) !important;
+  border-color: var(--accent-dark) !important;
+}
+
+/* Hide Streamlit chrome */
+#MainMenu, footer, header[data-testid="stHeader"] { visibility: hidden; height: 0; }
+header[data-testid="stHeader"] { background: transparent !important; }
+
+hr {
+  border: none !important;
+  border-top: 1px solid var(--line) !important;
+  margin: 1rem 0 !important;
+}
+
+.chip {
+  display: inline-block;
+  background: var(--neutral-bg);
+  color: var(--ink);
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-family: "JetBrains Mono", monospace;
+  padding: 0.15rem 0.55rem;
+  border-radius: 3px;
+  float: right;
+}
+</style>
+"""
 
 
-def M(S_, v):
-    return money(S_, v)
+def inject_styles():
+    st.markdown(DESKTOP_CSS, unsafe_allow_html=True)
 
 
-# ---------------------------------------------------------------- pages
-
-def page_jobs():
-    store = st.session_state.store
-    S = store["S"]
-    st.title("Jobs")
-    rows, tot_open, tot_paid, tot_over = [], 0.0, 0.0, 0.0
-    for j in store["jobs"]:
-        eff = eff_settings(S, j)
-        r = calc(eff, j)
-        stat = display_status(eff, j)
-        inv = j.get("docType") == "invoice"
-        if stat == "Paid":
-            tot_paid += r["total"]
-        elif stat == "Overdue":
-            tot_over += r["total"] - pos(j.get("paid"))
-        elif inv and stat == "Sent":
-            tot_open += r["total"] - pos(j.get("paid"))
-        rows.append({"Number": (j.get("invoiceNo") if inv else j.get("quoteNo")) or "", "Type": "Invoice" if inv else "Quote",
-                     "Customer": j.get("client") or "", "Job": j.get("title") or "Untitled", "Status": stat,
-                     "Total": round(r["total"], 2), "Date": fmt_date(parse_date(j.get("issueDate")))})
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Invoices awaiting payment", M(S, tot_open))
-    c2.metric("Overdue", M(S, tot_over))
-    c3.metric("Paid", M(S, tot_paid))
-    st.dataframe(rows, width="stretch", hide_index=True)
-
-    a, b, c, d = st.columns(4)
-    if a.button("New job", width="stretch"):
-        j = new_job(store["S"])
-        store["jobs"].append(j)
-        store["current"] = j["id"]
+def init_state():
+    if "S" not in st.session_state:
+        st.session_state.S = default_settings()
+    if "J" not in st.session_state:
+        st.session_state.J = sample_job()
+    if "library" not in st.session_state:
+        st.session_state.library = []
+    if "page" not in st.session_state:
         st.session_state.page = "Job costing"
-        st.rerun()
-    if b.button("Duplicate current", width="stretch"):
-        base = copy.deepcopy(current_job())
-        for k in ("id", "status", "snap", "invoiceNo", "paidDate", "paid", "docType", "sample"):
-            base.pop(k, None)
-        base["title"] = (base.get("title") or "Job") + " (copy)"
-        j = new_job(store["S"], base)
-        store["jobs"].append(j)
-        store["current"] = j["id"]
-        st.rerun()
-    tnames = {t["name"]: t for t in store["templates"]}
-    pick = c.selectbox("New from template", ["-"] + list(tnames), label_visibility="collapsed")
-    if pick != "-" and d.button("Create from template", width="stretch"):
-        t = tnames[pick]
-        base = {k: copy.deepcopy(t.get(k)) for k in ("title", "scope", "people", "hours", "km", "travelHours", "materials", "other")}
-        j = new_job(store["S"], base)
-        store["jobs"].append(j)
-        store["current"] = j["id"]
-        st.session_state.page = "Job costing"
-        st.rerun()
-    with st.expander("Delete the current job"):
-        st.write("Current: **%s**" % (current_job().get("title") or "Untitled"))
-        if len(store["jobs"]) > 1 and st.button("Delete this job"):
-            store["jobs"] = [j for j in store["jobs"] if j["id"] != store["current"]]
-            store["current"] = store["jobs"][-1]["id"]
-            st.rerun()
-        elif len(store["jobs"]) <= 1:
-            st.caption("You need at least one job.")
 
 
-def page_costing():
-    store = st.session_state.store
-    S = store["S"]
-    J = current_job()
-    st.title("Job costing")
-    if J.get("snap"):
-        st.info("Pricing is locked to the settings in force when this %s was sent. Open Quote & invoice to unlock it."
-                % ("invoice" if J.get("docType") == "invoice" else "quote"))
-    left, right = st.columns([3, 2], gap="large")
+def verdict_text(s: Dict, j: Dict, r: Dict) -> Tuple[str, str, str]:
+    gut = pos(j.get("gut"))
+    M = lambda v: money(s, v)
+    if r["cost"] <= 0:
+        return "neutral", "Add the job costs first", "Once the job has labour, travel or materials, this compares your usual price with what the job needs."
+    if gut <= 0:
+        return "neutral", "Enter your usual price", "Type what you would have quoted by gut feel to see what it earns you on this job."
+    if gut < r["direct"]:
+        return "bad", "You would lose money on this job", (
+            f"{M(gut)} does not cover the {M(r['direct'])} it costs you to do the work. "
+            f"You would be {M(r['direct'] - gut)} out of pocket before any overhead."
+        )
+    if gut < r["cost"]:
+        return "bad", "Overhead is not covered", (
+            f"{M(gut)} pays for the work but leaves {M(r['cost'] - gut)} of overhead unpaid. The job earns no profit."
+        )
+    if gut < r["price"] - 0.004:
+        gp = gut - r["cost"]
+        return "warn", "Below your target margin", (
+            f"{M(gut)} leaves {M(gp)} profit, a {gp / gut * 100:.1f}% margin against your "
+            f"{r['target'] * 100:.1f}% target. It is {M(r['price'] - gut)} short of the recommended quote."
+        )
+    gp = gut - r["cost"]
+    return "good", "At or above your target", f"{M(gut)} leaves {M(gp)} profit, a {gp / gut * 100:.1f}% margin."
+
+
+def _seg_bar(r: Dict) -> str:
+    if r["price"] <= 0:
+        return ""
+    segs = [
+        ("labour", "#2457E6"),
+        ("travel", "#0E8A8A"),
+        ("materials", "#C27A0E"),
+        ("other", "#7A4FBF"),
+        ("overhead", "#8393A3"),
+        ("profit", "#12A266"),
+    ]
+    parts = []
+    for k, col in segs:
+        pct = max(r[k], 0) / r["price"] * 100
+        if pct > 0.3:
+            parts.append(f'<div style="width:{pct:.2f}%;background:{col}"></div>')
+    return f'<div class="segbar">{"".join(parts)}</div>'
+
+
+def _breakdown(r: Dict, M) -> str:
+    rows = [
+        ("labour", "Labour", "#2457E6", False),
+        ("travel", "Travel", "#0E8A8A", False),
+        ("materials", "Materials & supplies", "#C27A0E", False),
+        ("other", "Other costs", "#7A4FBF", False),
+        ("direct", "Direct costs", None, True),
+        ("overhead", "Overhead", "#8393A3", False),
+        ("cost", "Total cost", None, True),
+        ("profit", "Profit", "#12A266", False),
+        ("price", "Quote price", None, True),
+    ]
+    html = []
+    for key, label, col, strong in rows:
+        val = r[key]
+        pct = f"{val / r['price'] * 100:.1f}%" if r["price"] > 0 else ""
+        cls = "brk str" if strong else "brk"
+        dot = f'<span class="brk-dot" style="background:{col}"></span>' if col else ""
+        html.append(
+            f'<div class="{cls}"><span class="nm">{dot}{label}</span>'
+            f'<span><span class="am">{M(val)}</span><span class="pc">{pct}</span></span></div>'
+        )
+    return "\n".join(html)
+
+
+def page_job():
+    S, J = st.session_state.S, st.session_state.J
+    r = calc(S, J)
+    M = lambda v: money(S, v)
+    tn = S.get("taxName") or "Tax"
+
+    st.markdown('<div class="crumb">Job costing</div>', unsafe_allow_html=True)
+    st.markdown(f"# {J.get('title') or 'New job'}")
+
+    if J.get("sample"):
+        st.markdown(
+            '<div class="banner">Sample job loaded. A two-person end-of-lease clean that a gut-feel quote '
+            "would underprice. Change any figure to cost your own job.</div>",
+            unsafe_allow_html=True,
+        )
+
+    left, right = st.columns([1.35, 1], gap="medium")
+
     with left:
-        J["title"] = st.text_input("Job title", J.get("title", ""), placeholder="e.g. End-of-lease clean")
-        custs = {c.get("name", ""): c for c in store["customers"] if c.get("name")}
-        if custs:
-            p = st.selectbox("Fill from saved customer", ["-"] + sorted(custs))
-            if p != "-" and st.button("Use %s" % p):
-                c = custs[p]
-                J.update(client=c.get("name", ""), custEmail=c.get("email", ""), custPhone=c.get("phone", ""),
-                         custAddress=c.get("address", ""))
-                st.rerun()
-        c1, c2 = st.columns(2)
-        J["client"] = c1.text_input("Customer", J.get("client", ""))
-        J["custEmail"] = c2.text_input("Customer email", J.get("custEmail", ""))
-        c1, c2 = st.columns(2)
-        J["custPhone"] = c1.text_input("Customer phone", J.get("custPhone", ""))
-        J["custAddress"] = c2.text_area("Customer address", J.get("custAddress", ""), height=68)
-        J["scope"] = st.text_area("Scope of work (shown on the quote)", J.get("scope", ""), height=110)
-        if J["client"] and J["client"] not in [c.get("name") for c in store["customers"]]:
-            if st.button("Save customer for next time"):
-                store["customers"].append({"id": uuid.uuid4().hex[:8], "name": J["client"], "email": J["custEmail"],
-                                           "phone": J["custPhone"], "address": J["custAddress"]})
-                st.rerun()
-        st.subheader("Time and travel")
-        c1, c2, c3, c4 = st.columns(4)
-        J["people"] = c1.number_input("People", 0.0, 100.0, float(num(J.get("people"))), 1.0)
-        J["hours"] = c2.number_input("Hours each", 0.0, 1000.0, float(num(J.get("hours"))), 0.5)
-        J["km"] = c3.number_input("Distance (km)", 0.0, 10000.0, float(num(J.get("km"))), 1.0)
-        J["travelHours"] = c4.number_input("Travel hrs each", 0.0, 100.0, float(num(J.get("travelHours"))), 0.25)
-        st.subheader("Materials")
-        from streamlit import column_config as cc
-        J["materials"] = edit_rows("mat_" + J["id"], J.get("materials", []), [
-            ("d", cc.TextColumn("Item")), ("q", cc.NumberColumn("Qty", min_value=0, default=1)),
-            ("c", cc.NumberColumn("Unit cost", min_value=0, format="%.2f"))])
-        st.subheader("Other costs")
-        J["other"] = edit_rows("oth_" + J["id"], J.get("other", []), [
-            ("d", cc.TextColumn("Item")), ("a", cc.NumberColumn("Amount", min_value=0, format="%.2f"))])
-        J["gut"] = st.number_input("What you would have quoted by gut feel (optional)", 0.0, 1e7, float(num(J.get("gut"))), 10.0)
-    touch(J)
-    r, eff = job_calc(S, J)
+        with st.container(border=True):
+            st.markdown("**Job details**")
+            st.caption("Shown on the quote and invoice.")
+            c1, c2 = st.columns(2)
+            with c1:
+                J["title"] = st.text_input("Job title", J.get("title") or "")
+            with c2:
+                J["client"] = st.text_input("Customer", J.get("client") or "")
+            J["scope"] = st.text_area("Scope of work", J.get("scope") or "", height=88)
+
+        with st.container(border=True):
+            st.markdown(
+                f'**Labour** <span class="chip">{M(r["labour"])}</span>',
+                unsafe_allow_html=True,
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                J["people"] = st.number_input("People on the job", min_value=0.0, value=float(J.get("people") or 1), step=1.0)
+            with c2:
+                J["hours"] = st.number_input("Hours on site, each", min_value=0.0, value=float(J.get("hours") or 0), step=0.25)
+            if r["on_site"]:
+                st.caption(f"{r['on_site']:.2f} hours on site at {M(pos(S.get('labourRate')))} per hour")
+            else:
+                st.caption("Enter the people and hours on site.")
+
+        with st.container(border=True):
+            st.markdown(
+                f'**Travel** <span class="chip">{M(r["travel"])}</span>',
+                unsafe_allow_html=True,
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                J["km"] = st.number_input("Distance, return trip", min_value=0.0, value=float(J.get("km") or 0), step=1.0, help="km")
+            with c2:
+                J["travelHours"] = st.number_input("Travel time, return trip", min_value=0.0, value=float(J.get("travelHours") or 0), step=0.25, help="hrs")
+            st.caption(
+                f"Vehicle {M(r['vehicle'])} plus travel time {M(r['travel_time'])}. Travel time is paid to every person."
+            )
+
+        with st.container(border=True):
+            st.markdown(
+                f'**Materials & supplies** <span class="chip">{M(r["materials"])}</span>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Everything you buy for this job.")
+            mats = J.get("materials") or []
+            data = [{"Item": m.get("d", ""), "Qty": float(m.get("q") or 1), "Unit cost": float(m.get("c") or 0)} for m in mats]
+            edited = st.data_editor(
+                data if data else [{"Item": "", "Qty": 1.0, "Unit cost": 0.0}],
+                num_rows="dynamic",
+                use_container_width=True,
+                key="mat_ed",
+                column_config={
+                    "Item": st.column_config.TextColumn("Item"),
+                    "Qty": st.column_config.NumberColumn("Qty", min_value=0, format="%.2f"),
+                    "Unit cost": st.column_config.NumberColumn("Unit cost", min_value=0, format="%.2f"),
+                },
+            )
+            J["materials"] = [
+                {"d": (row.get("Item") or "").strip(), "q": pos(row.get("Qty")), "c": pos(row.get("Unit cost"))}
+                for row in edited
+                if (row.get("Item") or "").strip() or pos(row.get("Unit cost")) > 0
+            ]
+
+        with st.container(border=True):
+            st.markdown(
+                f'**Other costs** <span class="chip">{M(r["other"])}</span>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Equipment hire, subcontractors, tip fees and permits.")
+            oths = J.get("other") or []
+            odata = [{"Description": o.get("d", ""), "Amount": float(o.get("a") or 0)} for o in oths]
+            oed = st.data_editor(
+                odata if odata else [{"Description": "", "Amount": 0.0}],
+                num_rows="dynamic",
+                use_container_width=True,
+                key="oth_ed",
+                column_config={
+                    "Description": st.column_config.TextColumn("Description"),
+                    "Amount": st.column_config.NumberColumn("Amount", min_value=0, format="%.2f"),
+                },
+            )
+            J["other"] = [
+                {"d": (row.get("Description") or "").strip(), "a": pos(row.get("Amount"))}
+                for row in oed
+                if (row.get("Description") or "").strip() or pos(row.get("Amount")) > 0
+            ]
+
     with right:
-        st.subheader("Price")
-        st.metric("Quote price (excl. tax)" if eff.get("taxOn") else "Quote price", M(eff, r["price"]))
-        if eff.get("taxOn"):
-            st.caption("%s %s: %s   |   Total %s" % (eff.get("taxName"), "%g%%" % r["tax_rate"], M(eff, r["tax"]), M(eff, r["total"])))
-        a, b = st.columns(2)
-        a.metric("Your cost", M(eff, r["cost"]))
-        b.metric("Profit", M(eff, r["profit"]))
-        a, b = st.columns(2)
-        a.metric("Margin", "%.1f%%" % (r["margin"] * 100), "target %g%%" % (r["target"] * 100), delta_color="off")
-        b.metric("Profit per paid hour", M(eff, r["pph"]))
+        # Hero — same as desktop dark panel
+        flag = ""
         if r["min_applied"]:
-            st.warning("Your minimum price applies, so the price is above the calculated %s." % M(eff, r["raw"]))
+            flag = f'<div class="hero-flag">Your minimum job price of {M(pos(S.get("minPrice")))} applies. The costed price was {M(r["raw"])}.</div>'
         elif r["rounded"]:
-            st.caption("Rounded up to the next %s from %s." % (M(eff, num(eff.get("roundTo"))), M(eff, r["raw"])))
-        if r["cost"] <= 0:
-            st.caption("Enter hours or costs to see a price.")
-        st.subheader("Where the cost goes")
-        st.dataframe([{"Item": k, "Amount": round(v, 2)} for k, v in [
-            ("Labour", r["labour"]), ("Travel (vehicle)", r["vehicle"]), ("Travel (time)", r["travel_time"]),
-            ("Materials", r["materials"]), ("Other", r["other"]), ("Overhead", r["overhead"]), ("Total cost", r["cost"])]],
-            hide_index=True, width="stretch")
-        g = num(J.get("gut"))
-        if g > 0:
-            diff = r["price"] - g
-            profit_g = g - r["cost"]
-            st.subheader("Versus your gut feel")
-            st.write("Gut feel %s would leave %s profit (%.1f%% margin). The calculated price is %s %s."
-                     % (M(eff, g), M(eff, profit_g), (profit_g / g * 100) if g else 0, M(eff, abs(diff)),
-                        "higher" if diff > 0 else "lower"))
+            flag = f'<div class="hero-flag">Rounded up from {M(r["raw"])}.</div>'
+
+        tax_line = (
+            f'{tn} {M(r["tax"])} &nbsp;|&nbsp; Total {M(r["total"])}'
+            if S.get("taxOn")
+            else f'Total {M(r["total"])}'
+        )
+        lab = "RECOMMENDED QUOTE" + (f" (EXCL. {tn.upper()})" if S.get("taxOn") else "")
+
+        st.markdown(
+            f"""
+            <div class="hero">
+              <div class="hero-label">{lab}</div>
+              <div class="hero-price">{M(r["price"])}</div>
+              <div class="hero-sub">{tax_line}</div>
+              {flag}
+              <div class="hero-stats">
+                <div><div class="hero-stat-label">Total cost</div><div class="hero-stat-value">{M(r["cost"])}</div></div>
+                <div><div class="hero-stat-label">Profit</div><div class="hero-stat-value">{M(r["profit"])}</div></div>
+                <div><div class="hero-stat-label">Margin</div><div class="hero-stat-value">{r["margin"]*100:.1f}%</div></div>
+                <div><div class="hero-stat-label">Profit per hour</div><div class="hero-stat-value">{M(r["pph"])}</div></div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.container(border=True):
+            st.markdown("**Compare with your usual quote**")
+            J["gut"] = st.number_input(
+                "Your usual quote, before tax",
+                min_value=0.0,
+                value=float(J.get("gut") or 0),
+                step=10.0,
+            )
+            tone, head, body = verdict_text(S, J, r)
+            st.markdown(
+                f'<div class="verdict v-{tone}"><strong>{head}</strong>{body}</div>',
+                unsafe_allow_html=True,
+            )
+
+        with st.container(border=True):
+            st.markdown("**Where the price goes**")
+            st.markdown(_seg_bar(r), unsafe_allow_html=True)
+            st.markdown(_breakdown(r, M), unsafe_allow_html=True)
+
+    st.divider()
+    a, b, c, _ = st.columns([1, 1, 1.2, 2])
+    with a:
+        if st.button("New blank job", use_container_width=True):
+            st.session_state.J = blank_job()
+            st.rerun()
+    with b:
+        if st.button("Load sample job", use_container_width=True):
+            st.session_state.J = sample_job()
+            st.rerun()
+    with c:
+        if st.button("Save to library", type="primary", use_container_width=True):
+            name = (J.get("title") or J.get("client") or "Untitled job").strip()
+            st.session_state.library.append({
+                "id": new_id(),
+                "saved_at": now_iso(),
+                "name": name,
+                "job": deepcopy(J),
+            })
+            st.toast(f"Saved “{name}”")
 
 
 def page_doc():
-    store = st.session_state.store
-    S = store["S"]
-    J = current_job()
-    st.title("Quote & invoice")
-    r, eff = job_calc(S, J)
-    left, right = st.columns([3, 2], gap="large")
-    with right:
-        st.subheader("Document")
-        inv = J.get("docType") == "invoice"
-        kind = st.radio("Type", ["Quote", "Invoice"], index=1 if inv else 0, horizontal=True)
-        want_inv = kind == "Invoice"
-        if want_inv != inv:
-            J["docType"] = "invoice" if want_inv else "quote"
-            if want_inv and not J.get("invoiceNo"):
-                assign_invoice_no(S, J)
-            J["status"] = "Draft"
-            J["snap"] = None
-            st.rerun()
-        statuses = INVOICE_STATUSES if inv else QUOTE_STATUSES
-        cur = J.get("status") if J.get("status") in statuses else "Draft"
-        new = st.selectbox("Status", statuses, index=statuses.index(cur))
-        if new != J.get("status"):
-            J["status"] = new
-            J["snap"] = take_snap(S) if new != "Draft" else None
-            if new == "Paid":
-                J["paidDate"] = today().isoformat()
-            st.rerun()
-        if J.get("snap"):
-            st.caption("Pricing locked at the settings in force when sent.")
-            if st.button("Unlock pricing (use current settings)"):
-                J["snap"] = take_snap(S)
-                st.rerun()
-        else:
-            st.caption("Not sent yet. Pricing follows your current settings.")
-        if not inv and st.button("Convert to invoice", type="primary"):
-            J["docType"] = "invoice"
-            if not J.get("invoiceNo"):
-                assign_invoice_no(S, J)
-            J["status"] = "Draft"
-            J["snap"] = None
-            st.rerun()
-        c1, c2 = st.columns(2)
-        if inv:
-            J["invoiceNo"] = c1.text_input("Invoice number", J.get("invoiceNo", ""))
-        else:
-            J["quoteNo"] = c1.text_input("Quote number", J.get("quoteNo", ""))
-        d = c2.date_input("Issue date", parse_date(J.get("issueDate")))
-        J["issueDate"] = d.isoformat()
-        J["itemised"] = st.checkbox("Show itemised lines", bool(J.get("itemised")),
-                                    help="Splits the price into labour, materials and other costs. Overhead and profit are spread across the lines, so your costs stay private.")
-        if inv:
-            J["paid"] = st.number_input("Amount received so far", 0.0, 1e8, float(num(J.get("paid"))), 10.0)
-        touch(J)
-        m = build_model(eff, J, r)
-        m["logo"] = logo_path()
-        data = pdf_bytes(m)
-        fname = "%s-%s.pdf" % (m["title"].replace(" ", "-"), m["number"] or "draft")
-        st.download_button("Download PDF", data, file_name=fname, mime="application/pdf", type="primary", width="stretch")
-        st.subheader("Send to customer")
-        st.caption("Download the PDF, then attach it to your email.")
-        subj, body = email_template(eff, J, m)
-        subj = st.text_input("Email subject", subj, key="subj_" + J["id"] + str(inv))
-        body = st.text_area("Email message", body, height=260, key="body_" + J["id"] + str(inv))
-        to = J.get("custEmail", "")
-        st.link_button("Open in my email app", "mailto:%s?subject=%s&body=%s" % (quote(to), quote(subj), quote(body)),
-                       width="stretch")
-        with st.expander("Copy as text"):
+    S, J = st.session_state.S, st.session_state.J
+    r = calc(S, J)
+    m = build_model(S, J, r)
+
+    st.markdown('<div class="crumb">Quote & invoice</div>', unsafe_allow_html=True)
+    st.markdown(f"# {m['title']} {m['number']}")
+
+    form, preview = st.columns([1, 1.2], gap="medium")
+
+    with form:
+        with st.container(border=True):
+            st.markdown("**Document**")
+            doc_type = st.radio(
+                "Type",
+                ["quote", "invoice"],
+                horizontal=True,
+                format_func=lambda x: "Quote" if x == "quote" else "Invoice",
+                index=0 if J.get("docType") != "invoice" else 1,
+                label_visibility="collapsed",
+            )
+            J["docType"] = doc_type
+            if doc_type == "quote":
+                J["quoteNo"] = st.text_input("Quote number", J.get("quoteNo") or "")
+            else:
+                J["invoiceNo"] = st.text_input("Invoice number", J.get("invoiceNo") or "")
+                J["paid"] = st.number_input(
+                    "Amount already received, including tax",
+                    min_value=0.0,
+                    value=float(J.get("paid") or 0),
+                    step=10.0,
+                )
+            issue = st.date_input("Issue date", parse_date(J.get("issueDate")))
+            J["issueDate"] = issue.isoformat()
+            J["itemised"] = st.checkbox(
+                "Show itemised lines",
+                value=bool(J.get("itemised")),
+                help="Splits the price into labour, materials and other costs. Overhead and profit stay private.",
+            )
+
+        with st.container(border=True):
+            st.markdown("**Customer**")
+            J["custEmail"] = st.text_input("Customer email", J.get("custEmail") or "")
+            J["custAddress"] = st.text_area("Customer address", J.get("custAddress") or "", height=72)
+
+        with st.container(border=True):
+            st.markdown("**1. Download the PDF**")
+            st.caption("Save the file, then attach it when you send the email.")
+            if not HAS_REPORTLAB:
+                st.error("Install reportlab: pip install reportlab")
+            else:
+                try:
+                    pdf = make_pdf_bytes(m)
+                    fname = f"{(m['title'] or 'doc').replace(' ', '-')}-{m['number']}.pdf".replace("/", "-")
+                    st.download_button(
+                        "Save as PDF…",
+                        data=pdf,
+                        file_name=fname,
+                        mime="application/pdf",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                except Exception as exc:
+                    st.error(str(exc))
+            st.download_button(
+                "Download as text",
+                data=model_text(m),
+                file_name=f"{m['number']}.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+
+        with st.container(border=True):
+            st.markdown("**2. Send by email**")
+            st.caption(
+                "Opens your email app with the message filled in. "
+                "Attach the PDF you just downloaded before sending."
+            )
+            if not J.get("emailEdited"):
+                subj, body = email_template(S, J, m)
+                J["emailSubject"], J["emailBody"] = subj, body
+            J["custEmail"] = st.text_input(
+                "To",
+                J.get("custEmail") or "",
+                placeholder="customer@email.com",
+                key="email_to_field",
+            )
+            J["emailSubject"] = st.text_input("Subject", J.get("emailSubject") or "")
+            J["emailBody"] = st.text_area("Message", J.get("emailBody") or "", height=200)
+            J["emailEdited"] = True
+
+            to_addr = (J.get("custEmail") or "").strip()
+            subj = J.get("emailSubject") or ""
+            body = J.get("emailBody") or ""
+            mailto = f"mailto:{quote(to_addr)}?subject={quote(subj)}&body={quote(body)}"
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.link_button(
+                    "Open email app",
+                    mailto,
+                    use_container_width=True,
+                    type="primary",
+                    help="Opens Outlook, Apple Mail, Gmail app, etc. with this message ready to send.",
+                )
+            with c2:
+                if st.button("Copy message", use_container_width=True):
+                    st.session_state["_copied_msg"] = f"To: {to_addr}\nSubject: {subj}\n\n{body}"
+                    st.toast("Message ready — select and copy from the box below if needed.")
+            with c3:
+                if st.button("Reset template", use_container_width=True):
+                    J["emailEdited"] = False
+                    st.rerun()
+
+            if not to_addr:
+                st.caption("Tip: enter the customer email above so the “To” field is filled automatically.")
+
+            if st.session_state.get("_copied_msg"):
+                st.code(st.session_state["_copied_msg"], language=None)
+
+    with preview:
+        with st.container(border=True):
+            st.markdown("**Preview**")
             st.code(model_text(m), language=None)
-    with left:
-        try:
-            for png in pdf_pages_png(data):
-                st.image(png, width="stretch")
-        except Exception:  # noqa: BLE001
-            st.info("The page preview isn't available here. Use Download PDF to see the document.")
 
 
-def page_customers():
-    store = st.session_state.store
-    st.title("Customers")
-    import pandas as pd
-    df = pd.DataFrame(store["customers"], columns=["id", "name", "email", "phone", "address"])
-    out = st.data_editor(df, num_rows="dynamic", width="stretch", hide_index=True,
-                         column_config={"id": None}, key="cust_editor")
-    recs = []
-    for rec in out.to_dict("records"):
-        if not (rec.get("name") or "").strip():
+def page_library():
+    st.markdown('<div class="crumb">Job library</div>', unsafe_allow_html=True)
+    st.markdown("# Saved jobs")
+
+    lib = st.session_state.library
+    q = st.text_input("Search", "", placeholder="Search by title, customer or notes")
+    qn = q.strip().lower()
+
+    if not lib:
+        st.info("No saved jobs yet. Cost a job and click **Save to library**.")
+        return
+
+    items = sorted(lib, key=lambda x: x.get("saved_at") or "", reverse=True)
+    shown = 0
+    for entry in items:
+        job = entry.get("job") or {}
+        name = entry.get("name") or job.get("title") or "Untitled"
+        client = job.get("client") or ""
+        hay = f"{name} {client} {job.get('scope', '')}".lower()
+        if qn and qn not in hay:
             continue
-        rec = {k: ("" if (v is None or (isinstance(v, float) and math.isnan(v))) else v) for k, v in rec.items()}
-        rec["id"] = rec.get("id") or uuid.uuid4().hex[:8]
-        recs.append(rec)
-    store["customers"] = recs
+        shown += 1
+        try:
+            price = calc(st.session_state.S, job)["price"]
+        except Exception:
+            price = 0.0
+        saved = (entry.get("saved_at") or "")[:16].replace("T", " ")
+
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([3, 1.2, 1.6])
+            with c1:
+                st.markdown(f"**{name}**")
+                st.caption(f"{client or '—'} · {saved}")
+            with c2:
+                st.markdown(
+                    f'<div style="font-family:JetBrains Mono,monospace;font-weight:600;font-size:1.05rem;padding-top:0.3rem">'
+                    f'{money(st.session_state.S, price)}</div>',
+                    unsafe_allow_html=True,
+                )
+            with c3:
+                x, y, z = st.columns(3)
+                if x.button("Load", key=f"ld{entry['id']}", use_container_width=True):
+                    st.session_state.J = deepcopy(job)
+                    st.session_state.J["emailEdited"] = False
+                    st.session_state.page = "Job costing"
+                    st.rerun()
+                if y.button("Copy", key=f"cp{entry['id']}", use_container_width=True):
+                    nj = deepcopy(job)
+                    nj["id"] = new_id()
+                    st.session_state.library.append({
+                        "id": new_id(),
+                        "saved_at": now_iso(),
+                        "name": name + " (copy)",
+                        "job": nj,
+                    })
+                    st.rerun()
+                if z.button("Del", key=f"dl{entry['id']}", use_container_width=True):
+                    st.session_state.library = [e for e in lib if e.get("id") != entry.get("id")]
+                    st.rerun()
+
+    st.caption(f"{shown} of {len(lib)} jobs")
 
 
 def page_settings():
-    S = st.session_state.store["S"]
-    st.title("Business settings")
-    st.caption("Changes apply to every job that hasn't been sent yet. Sent quotes keep the pricing they were sent with.")
-    t1, t2, t3 = st.tabs(["Pricing", "Business details", "Numbering and terms"])
+    S = st.session_state.S
+    st.markdown('<div class="crumb">Business settings</div>', unsafe_allow_html=True)
+    st.markdown("# Your rates and business details")
+
+    t1, t2, t3 = st.tabs(["Your business", "Rates & pricing", "Terms & tax"])
+
     with t1:
-        c1, c2, c3 = st.columns(3)
-        cur = ["AUD", "NZD", "USD", "CAD", "GBP", "EUR"]
-        S["currency"] = c1.selectbox("Currency", cur, index=cur.index(S["currency"]) if S["currency"] in cur else 0)
-        S["labourRate"] = c2.number_input("Hourly labour cost", 0.0, 10000.0, float(num(S["labourRate"])), 1.0,
-                                          help="What an hour of work costs you, including wages and on-costs.")
-        S["margin"] = c3.number_input("Target profit margin (%)", 0.0, 90.0, float(num(S["margin"])), 1.0,
-                                      help="Profit as a share of the price. 25% means a $100 job costs you $75.")
-        c1, c2, c3 = st.columns(3)
-        modes = ["percent", "hourly"]
-        S["overheadMode"] = c1.selectbox("Overhead method", modes, index=modes.index(S["overheadMode"]) if S["overheadMode"] in modes else 0,
-                                         format_func=lambda x: "% of direct costs" if x == "percent" else "Per paid hour")
-        if S["overheadMode"] == "percent":
-            S["overheadPct"] = c2.number_input("Overhead (%)", 0.0, 500.0, float(num(S["overheadPct"])), 1.0)
-        else:
-            S["overheadHourly"] = c2.number_input("Overhead per paid hour", 0.0, 1000.0, float(num(S["overheadHourly"])), 0.5)
-        S["travelRate"] = c3.number_input("Vehicle cost per km", 0.0, 100.0, float(num(S["travelRate"])), 0.01)
-        c1, c2 = st.columns(2)
-        S["minPrice"] = c1.number_input("Minimum job price", 0.0, 1e7, float(num(S["minPrice"])), 10.0)
-        S["roundTo"] = c2.number_input("Round price up to the next", 0.0, 1000.0, float(num(S["roundTo"])), 1.0)
-        c1, c2, c3 = st.columns(3)
-        S["taxOn"] = c1.checkbox("Charge tax", bool(S["taxOn"]))
-        S["taxName"] = c2.text_input("Tax name", S["taxName"])
-        S["taxRate"] = c3.number_input("Tax rate (%)", 0.0, 100.0, float(num(S["taxRate"])), 0.5)
+        with st.container(border=True):
+            st.markdown("**Your business**")
+            st.caption("Printed at the top of every quote and invoice.")
+            S["bizName"] = st.text_input("Business name", S.get("bizName") or "")
+            c1, c2 = st.columns(2)
+            with c1:
+                S["abn"] = st.text_input("ABN or tax number", S.get("abn") or "")
+            with c2:
+                S["phone"] = st.text_input("Phone", S.get("phone") or "")
+            S["bizEmail"] = st.text_input("Business email", S.get("bizEmail") or "")
+            S["address"] = st.text_area("Business address", S.get("address") or "", height=72)
+            curs = ["AUD", "NZD", "USD", "CAD", "GBP", "EUR", "JPY", "SGD", "HKD", "CHF", "INR"]
+            cur = str(S.get("currency", "AUD")).upper()
+            S["currency"] = st.selectbox("Currency code", curs, index=curs.index(cur) if cur in curs else 0)
+
     with t2:
-        c1, c2 = st.columns(2)
-        S["bizName"] = c1.text_input("Business name", S["bizName"])
-        S["abn"] = c2.text_input("ABN / tax number", S["abn"])
-        c1, c2 = st.columns(2)
-        S["phone"] = c1.text_input("Phone", S["phone"])
-        S["bizEmail"] = c2.text_input("Email", S["bizEmail"])
-        S["address"] = st.text_area("Address", S["address"], height=80)
-        S["payDetails"] = st.text_area("Payment details (shown on invoices)", S["payDetails"], height=90)
-        up = st.file_uploader("Logo (PNG or JPG)", type=["png", "jpg", "jpeg"])
-        if up is not None:
-            try:
-                from PIL import Image
-                import io
-                im = Image.open(up).convert("RGBA")
-                im.thumbnail((600, 300))
-                b = io.BytesIO()
-                im.save(b, format="PNG")
-                S["logoB64"] = base64.b64encode(b.getvalue()).decode()
-            except Exception:  # noqa: BLE001
-                st.error("That image could not be read.")
-        if S.get("logoB64"):
-            st.image(base64.b64decode(S["logoB64"]), width=160)
-            if st.button("Remove logo"):
-                S.pop("logoB64", None)
-                st.rerun()
+        with st.container(border=True):
+            st.markdown("**Labour cost**")
+            S["labourRate"] = st.number_input(
+                "Hourly labour cost, per person",
+                min_value=0.0,
+                value=float(S.get("labourRate") or 38),
+                step=1.0,
+                help="What one person costs you per hour, including super, leave, insurance and payroll.",
+            )
+
+        with st.container(border=True):
+            st.markdown("**Overhead allowance**")
+            mode = st.radio(
+                "Mode",
+                ["percent", "hourly"],
+                horizontal=True,
+                format_func=lambda x: "% of direct costs" if x == "percent" else "Per labour hour",
+                index=0 if S.get("overheadMode") != "hourly" else 1,
+            )
+            S["overheadMode"] = mode
+            if mode == "percent":
+                S["overheadPct"] = st.number_input(
+                    "Overhead as a share of direct costs",
+                    min_value=0.0,
+                    value=float(S.get("overheadPct") or 15),
+                    step=1.0,
+                )
+            else:
+                S["overheadHourly"] = st.number_input(
+                    "Overhead per labour hour",
+                    min_value=0.0,
+                    value=float(S.get("overheadHourly") or 6),
+                    step=0.5,
+                )
+
+        with st.container(border=True):
+            st.markdown("**Profit & pricing**")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                S["margin"] = st.number_input("Target profit margin %", min_value=0.0, max_value=90.0, value=float(S.get("margin") or 25), step=1.0)
+            with c2:
+                S["minPrice"] = st.number_input("Minimum job price", min_value=0.0, value=float(S.get("minPrice") or 150), step=10.0)
+            with c3:
+                S["roundTo"] = st.number_input("Round quote up to", min_value=0.0, value=float(S.get("roundTo") or 5), step=1.0, help="$ step")
+
+            mm = clamp(num(S.get("margin")), 0, 90) / 100
+            if 0 < mm < 1:
+                st.info(
+                    f"At a {mm*100:.1f}% margin, a job that costs {money(S, 100)} is quoted at "
+                    f"{money(S, 100/(1-mm))}. That is a {mm/(1-mm)*100:.1f}% markup on cost."
+                )
+
+        with st.container(border=True):
+            st.markdown("**Travel**")
+            S["travelRate"] = st.number_input(
+                "Vehicle cost per kilometre",
+                min_value=0.0,
+                value=float(S.get("travelRate") or 0.88),
+                step=0.05,
+                help="Fuel, servicing, tyres and depreciation. Travel time is charged at your labour cost.",
+            )
+
     with t3:
-        c1, c2, c3, c4 = st.columns(4)
-        S["quotePrefix"] = c1.text_input("Quote prefix", S["quotePrefix"])
-        S["nextQuote"] = c2.number_input("Next quote number", 1, 10**9, int(num(S["nextQuote"]) or 1001))
-        S["invoicePrefix"] = c3.text_input("Invoice prefix", S["invoicePrefix"])
-        S["nextInvoice"] = c4.number_input("Next invoice number", 1, 10**9, int(num(S["nextInvoice"]) or 1001))
-        c1, c2, c3 = st.columns(3)
-        S["validDays"] = c1.number_input("Quote valid for (days)", 0, 365, int(num(S["validDays"])))
-        S["depositPct"] = c2.number_input("Deposit requested (%)", 0.0, 100.0, float(num(S["depositPct"])), 5.0)
-        S["payTerms"] = c3.number_input("Payment terms (days)", 0, 365, int(num(S["payTerms"])))
-        S["docNote"] = st.text_input("Footer note", S["docNote"])
-        if st.button("Restore example settings"):
-            keep = {k: S[k] for k in ("quotePrefix", "nextQuote", "invoicePrefix", "nextInvoice")}
-            S.clear()
-            S.update(default_settings())
-            S.update(keep)
-            st.rerun()
+        with st.container(border=True):
+            st.markdown("**Tax**")
+            S["taxOn"] = st.checkbox("Add tax to quotes and invoices", value=bool(S.get("taxOn")))
+            c1, c2 = st.columns(2)
+            with c1:
+                S["taxName"] = st.text_input("Tax name", S.get("taxName") or "GST")
+            with c2:
+                S["taxRate"] = st.number_input("Tax rate %", min_value=0.0, value=float(S.get("taxRate") or 10), step=0.5)
 
+        with st.container(border=True):
+            st.markdown("**Terms & payment**")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                S["validDays"] = st.number_input("Quote valid for (days)", min_value=0, value=int(S.get("validDays") or 30), step=1)
+            with c2:
+                S["depositPct"] = st.number_input("Deposit to book %", min_value=0.0, value=float(S.get("depositPct") or 20), step=5.0)
+            with c3:
+                S["payTerms"] = st.number_input("Invoice terms (days)", min_value=0, value=int(S.get("payTerms") or 14), step=1)
+            S["payDetails"] = st.text_area("Payment details, printed on invoices", S.get("payDetails") or "", height=90)
+            S["docNote"] = st.text_input("Closing note", S.get("docNote") or "")
 
-# ---------------------------------------------------------------- app
+    st.divider()
+    if st.button("Restore example settings"):
+        st.session_state.S = default_settings()
+        st.rerun()
+
 
 def main():
-    st.set_page_config(page_title="Job Costing", page_icon=":material/calculate:", layout="wide")
-    if "store" not in st.session_state:
-        st.session_state.store = blank_store()
-        st.session_state.sid = uuid.uuid4().hex[:8]
-        st.session_state.page = "Jobs"
-    store = st.session_state.store
-    pages = {"Jobs": page_jobs, "Job costing": page_costing, "Quote & invoice": page_doc,
-             "Customers": page_customers, "Business settings": page_settings}
+    st.set_page_config(
+        page_title="Job Costing & Quotation Calculator",
+        page_icon="▢",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    inject_styles()
+    init_state()
+
     with st.sidebar:
-        st.markdown("### Job Costing")
-        st.caption("Quotation calculator")
-        st.radio("Go to", list(pages), key="page", label_visibility="collapsed")
-        st.divider()
-        labels = {j["id"]: "%s  %s" % ((j.get("invoiceNo") if j.get("docType") == "invoice" else j.get("quoteNo")) or "", j.get("title") or "Untitled")
-                  for j in store["jobs"]}
-        cur = st.selectbox("Current job", list(labels), index=list(labels).index(store["current"]) if store["current"] in labels else 0,
-                           format_func=lambda i: labels[i])
-        store["current"] = cur
-        st.divider()
-        st.caption("Your data stays in this browser session. Download a backup to keep it.")
-        st.download_button("Download backup", json.dumps(store, indent=1), file_name="job-costing-backup-%s.json" % today().strftime("%Y%m%d"),
-                           mime="application/json", width="stretch")
-        up = st.file_uploader("Restore backup", type=["json"], key="restore")
-        if up is not None and st.session_state.get("restored") != up.file_id:
-            try:
-                st.session_state.store = import_store(json.load(up))
-                st.session_state.restored = up.file_id
-                st.rerun()
-            except (ValueError, OSError) as e:
-                st.error("Could not restore: %s" % e)
-    pages[st.session_state.page]()
+        st.markdown(
+            """
+            <div style="display:flex;align-items:center;gap:10px;padding:0.35rem 0 1.1rem">
+              <div style="width:34px;height:34px;background:#2457E6;border-radius:4px;display:flex;flex-direction:column;justify-content:center;padding-left:8px;gap:4px">
+                <div style="height:2.5px;width:18px;background:#fff;border-radius:1px"></div>
+                <div style="height:2.5px;width:12px;background:#fff;border-radius:1px"></div>
+                <div style="height:2.5px;width:7px;background:#fff;border-radius:1px"></div>
+              </div>
+              <div>
+                <div style="font-weight:700;font-size:0.95rem;color:#fff;line-height:1.2">Job Costing</div>
+                <div style="font-size:0.72rem;color:#7D8EA6">Quotation Calculator</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        pages = [
+            ("Job costing", "Job costing"),
+            ("Quote & invoice", "Quote & invoice"),
+            ("Job library", "Job library"),
+            ("Business settings", "Business settings"),
+        ]
+        labels = [p[0] for p in pages]
+        current = st.session_state.page if st.session_state.page in labels else labels[0]
+        choice = st.radio(
+            "nav",
+            labels,
+            index=labels.index(current),
+            label_visibility="collapsed",
+        )
+        st.session_state.page = choice
+
+        st.markdown("---")
+        st.markdown(
+            f'<div style="font-weight:700;color:#fff;font-size:0.88rem">{st.session_state.S.get("bizName") or "Your business"}</div>',
+            unsafe_allow_html=True,
+        )
+        n = len(st.session_state.library)
+        st.caption(f"{n} job{'s' if n != 1 else ''} in library · session only")
+
+    page = st.session_state.page
+    if page == "Job costing":
+        page_job()
+    elif page == "Quote & invoice":
+        page_doc()
+    elif page == "Job library":
+        page_library()
+    else:
+        page_settings()
 
 
-main()
+if __name__ == "__main__":
+    main()
