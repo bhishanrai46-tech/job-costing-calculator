@@ -1216,299 +1216,220 @@ def page_job():
 
 
 def render_doc_preview(m: Dict) -> str:
-    """Professional HTML preview matching the PDF."""
-    biz = "".join(f"<div class='pv-line'>{_esc(x)}</div>" for x in m.get("bizLines") or [])
-    bill = "".join(f"<div class='pv-line'>{_esc(x)}</div>" for x in m.get("billLines") or [])
-    meta_rows = "".join(
-        f"<div class='pv-meta-row'><span>{_esc(k)}</span><strong>{_esc(v)}</strong></div>"
-        for k, v in (m.get("meta") or [])
-    )
-    lines_html = "".join(
-        f"<tr><td class='pv-desc'>{_esc(d)}</td><td class='pv-amt'>{_esc(a)}</td></tr>"
-        for d, a in (m.get("lines") or [])
-    )
-    totals = ""
-    for label, val, strong in m.get("totals") or []:
-        if strong:
-            totals += (
-                f"<div class='pv-tot pv-tot-strong'><span>{_esc(label)}</span>"
-                f"<span>{_esc(val)}</span></div>"
-            )
-        else:
-            totals += (
-                f"<div class='pv-tot'><span>{_esc(label)}</span>"
-                f"<span>{_esc(val)}</span></div>"
-            )
-    hl = ""
-    if m.get("highlight"):
-        hl = (
-            f"<div class='pv-hl'><span>{_esc(m['highlight'][0])}</span>"
-            f"<strong>{_esc(m['highlight'][1])}</strong></div>"
-        )
-    pay = ""
-    if m.get("payment"):
-        pay = (
-            f"<div class='pv-section-label'>Payment details</div>"
-            f"<div class='pv-pay'>{_esc(m['payment']).replace(chr(10), '<br>')}</div>"
-        )
-    notes = "".join(f"<p class='pv-note'>{_esc(n)}</p>" for n in (m.get("notes") or []))
-    scope = ""
-    if m.get("scope"):
-        scope = f"<p class='pv-scope'>{_esc(m['scope']).replace(chr(10), '<br>')}</p>"
+    """Professional HTML preview matching the PDF. Empty sections are omitted."""
 
-    return f"""
-<style>
-  .pv-wrap {{
+    def lines_div(items):
+        out = []
+        for x in items:
+            if str(x).strip():
+                out.append('<div class="pv-line">' + _esc(x) + "</div>")
+        return "".join(out)
+
+    biz = lines_div(m.get("bizLines") or [])
+    bill_lines = lines_div(m.get("billLines") or [])
+    bill_name = (m.get("billName") or "").strip()
+    bill_label = (m.get("billLabel") or "").strip()
+
+    meta_rows = []
+    for k, v in m.get("meta") or []:
+        if str(v).strip():
+            meta_rows.append(
+                '<div class="pv-meta-row"><span>'
+                + _esc(k)
+                + "</span><strong>"
+                + _esc(v)
+                + "</strong></div>"
+            )
+    meta_rows = "".join(meta_rows)
+
+    lines_html = []
+    for d, a in m.get("lines") or []:
+        if str(d).strip() or str(a).strip():
+            lines_html.append(
+                '<tr><td class="pv-desc">'
+                + _esc(d)
+                + '</td><td class="pv-amt">'
+                + _esc(a)
+                + "</td></tr>"
+            )
+    lines_html = "".join(lines_html)
+
+    totals = []
+    for label, val, strong in m.get("totals") or []:
+        cls = "pv-tot pv-tot-strong" if strong else "pv-tot"
+        totals.append(
+            '<div class="'
+            + cls
+            + '"><span>'
+            + _esc(label)
+            + "</span><span>"
+            + _esc(val)
+            + "</span></div>"
+        )
+    totals = "".join(totals)
+
+    hl = ""
+    if m.get("highlight") and str(m["highlight"][0]).strip():
+        hl = (
+            '<div class="pv-hl"><span>'
+            + _esc(m["highlight"][0])
+            + "</span><strong>"
+            + _esc(m["highlight"][1])
+            + "</strong></div>"
+        )
+
+    pay = ""
+    payment = (m.get("payment") or "").strip()
+    if payment:
+        pay = (
+            '<div class="pv-section-label">Payment details</div>'
+            '<div class="pv-pay">'
+            + _esc(payment).replace("\n", "<br>")
+            + "</div>"
+        )
+
+    notes_list = [n for n in (m.get("notes") or []) if str(n).strip()]
+    notes = "".join('<p class="pv-note">' + _esc(n) + "</p>" for n in notes_list)
+    notes_block = ('<div class="pv-notes">' + notes + "</div>") if notes else ""
+
+    scope_text = (m.get("scope") or "").strip()
+    scope = (
+        ('<p class="pv-scope">' + _esc(scope_text).replace("\n", "<br>") + "</p>")
+        if scope_text
+        else ""
+    )
+
+    job_title = (m.get("jobTitle") or "").strip()
+    job_block = ('<p class="pv-job">' + _esc(job_title) + "</p>") if job_title else ""
+
+    bill_block = ""
+    if bill_label or bill_name or bill_lines:
+        parts = ["<div>"]
+        if bill_label:
+            parts.append('<p class="pv-label">' + _esc(bill_label) + "</p>")
+        if bill_name:
+            parts.append('<p class="pv-bill-name">' + _esc(bill_name) + "</p>")
+        parts.append(bill_lines)
+        parts.append("</div>")
+        bill_block = "".join(parts)
+
+    meta_block = ('<div class="pv-meta">' + meta_rows + "</div>") if meta_rows else ""
+
+    table_block = ""
+    if lines_html:
+        cc = _esc(m.get("currency") or "AUD")
+        table_block = (
+            '<table class="pv-table"><thead><tr>'
+            "<th>Description</th><th>Amount (" + cc + ")</th>"
+            "</tr></thead><tbody>"
+            + lines_html
+            + "</tbody></table>"
+        )
+
+    totals_block = ('<div class="pv-totals">' + totals + "</div>") if totals else ""
+    divider_notes = '<hr class="pv-divider"/>' if notes_block else ""
+
+    css = """
+  html, body { margin: 0; padding: 0; background: transparent; }
+  .pv-wrap {
     background: linear-gradient(180deg, #eef1f6 0%, #e4e9f0 100%);
-    padding: 20px 16px 28px;
-    border-radius: 8px;
-    border: 1px solid #d5dbe6;
-  }}
-  .pv-sheet {{
-    background: #fff;
-    max-width: 480px;
-    margin: 0 auto;
-    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
-    color: #0f1b2d;
-    font-size: 12.5px;
-    line-height: 1.5;
-    border-radius: 2px;
+    padding: 20px 16px 28px; border-radius: 8px; border: 1px solid #d5dbe6;
+  }
+  .pv-sheet {
+    background: #fff; max-width: 480px; margin: 0 auto;
+    font-family: Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
+    color: #0f1b2d; font-size: 12.5px; line-height: 1.5; border-radius: 2px;
     overflow: hidden;
-    box-shadow:
-      0 0 0 1px rgba(15,27,45,0.06),
-      0 8px 24px rgba(15,27,45,0.08),
-      0 2px 6px rgba(15,27,45,0.04);
-  }}
-  .pv-band {{ height: 5px; background: linear-gradient(90deg, #1b47c4, #2457e6 40%, #3b7af0); }}
-  .pv-body {{ padding: 26px 28px 22px; }}
-  .pv-header {{
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 20px;
-    margin-bottom: 4px;
-  }}
-  .pv-biz-name {{
-    font-size: 16px;
-    font-weight: 700;
-    letter-spacing: -0.025em;
-    color: #0f1b2d;
-    margin: 0 0 6px;
-  }}
-  .pv-line {{ color: #5c6b80; font-size: 11.5px; line-height: 1.45; }}
-  .pv-doc-title {{
-    font-size: 20px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-align: right;
-    color: #0f1b2d;
-    margin: 0;
-    line-height: 1.15;
-  }}
-  .pv-doc-num {{
-    color: #5c6b80;
-    font-size: 12px;
-    text-align: right;
-    margin-top: 4px;
-    font-variant-numeric: tabular-nums;
-  }}
-  .pv-divider {{
-    height: 1px;
-    background: #e4e9f0;
-    margin: 16px 0;
-    border: none;
-  }}
-  .pv-two-col {{
-    display: flex;
-    justify-content: space-between;
-    gap: 28px;
-    margin-bottom: 18px;
-  }}
-  .pv-label {{
-    font-size: 9.5px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #7a8ba0;
-    margin: 0 0 5px;
-  }}
-  .pv-bill-name {{
-    font-size: 13.5px;
-    font-weight: 700;
-    color: #0f1b2d;
-    margin: 0 0 3px;
-  }}
-  .pv-meta {{ min-width: 168px; }}
-  .pv-meta-row {{
-    display: flex;
-    justify-content: space-between;
-    gap: 16px;
-    font-size: 11.5px;
-    margin-bottom: 5px;
-    color: #5c6b80;
-  }}
-  .pv-meta-row strong {{
-    color: #0f1b2d;
-    font-weight: 600;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }}
-  .pv-job {{
-    font-size: 14px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    color: #0f1b2d;
-    margin: 0 0 4px;
-  }}
-  .pv-scope {{
-    color: #5c6b80;
-    font-size: 11.5px;
-    margin: 0 0 16px;
-    line-height: 1.5;
-  }}
-  .pv-table {{
-    width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 8px;
-  }}
-  .pv-table thead th {{
-    background: #f4f6f9;
-    color: #7a8ba0;
-    font-size: 9.5px;
-    font-weight: 700;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    text-align: left;
-    padding: 9px 12px;
-    border-bottom: 1px solid #e4e9f0;
-  }}
-  .pv-table thead th:last-child {{ text-align: right; }}
-  .pv-table tbody td {{
-    padding: 11px 12px;
-    border-bottom: 1px solid #eef1f5;
-    vertical-align: top;
-  }}
-  .pv-desc {{ color: #0f1b2d; font-size: 12.5px; }}
-  .pv-amt {{
-    text-align: right;
-    font-weight: 600;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-    color: #0f1b2d;
-    font-size: 12.5px;
-  }}
-  .pv-totals {{ margin-top: 6px; padding-right: 4px; }}
-  .pv-tot {{
-    display: flex;
-    justify-content: flex-end;
-    align-items: baseline;
-    gap: 40px;
-    font-size: 12px;
-    padding: 5px 8px;
-    color: #5c6b80;
-  }}
-  .pv-tot span:last-child {{
-    min-width: 88px;
-    text-align: right;
-    color: #0f1b2d;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-  }}
-  .pv-tot-strong {{
-    color: #0f1b2d;
-    font-weight: 700;
-    font-size: 13px;
-    margin-top: 2px;
-    padding-top: 10px;
-    border-top: 1.5px solid #0f1b2d;
-  }}
-  .pv-tot-strong span:last-child {{ font-weight: 700; font-size: 13.5px; }}
-  .pv-hl {{
-    margin: 14px 0 4px auto;
-    max-width: 230px;
+    box-shadow: 0 0 0 1px rgba(15,27,45,0.06), 0 8px 24px rgba(15,27,45,0.08);
+  }
+  .pv-band { height: 5px; background: linear-gradient(90deg, #1b47c4, #2457e6 40%, #3b7af0); }
+  .pv-body { padding: 26px 28px 22px; }
+  .pv-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+  .pv-biz-name { font-size: 16px; font-weight: 700; letter-spacing: -0.025em; margin: 0 0 6px; }
+  .pv-line { color: #5c6b80; font-size: 11.5px; line-height: 1.45; }
+  .pv-doc-title { font-size: 20px; font-weight: 700; letter-spacing: 0.04em; text-align: right; margin: 0; line-height: 1.15; }
+  .pv-doc-num { color: #5c6b80; font-size: 12px; text-align: right; margin-top: 4px; }
+  .pv-divider { height: 1px; background: #e4e9f0; margin: 16px 0; border: none; }
+  .pv-two-col { display: flex; justify-content: space-between; gap: 28px; margin-bottom: 18px; }
+  .pv-label { font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #7a8ba0; margin: 0 0 5px; }
+  .pv-bill-name { font-size: 13.5px; font-weight: 700; margin: 0 0 3px; }
+  .pv-meta { min-width: 168px; }
+  .pv-meta-row { display: flex; justify-content: space-between; gap: 16px; font-size: 11.5px; margin-bottom: 5px; color: #5c6b80; }
+  .pv-meta-row strong { color: #0f1b2d; font-weight: 600; text-align: right; }
+  .pv-job { font-size: 14px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 4px; }
+  .pv-scope { color: #5c6b80; font-size: 11.5px; margin: 0 0 16px; line-height: 1.5; }
+  .pv-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  .pv-table thead th {
+    background: #f4f6f9; color: #7a8ba0; font-size: 9.5px; font-weight: 700;
+    letter-spacing: 0.07em; text-transform: uppercase; text-align: left;
+    padding: 9px 12px; border-bottom: 1px solid #e4e9f0;
+  }
+  .pv-table thead th:last-child { text-align: right; }
+  .pv-table tbody td { padding: 11px 12px; border-bottom: 1px solid #eef1f5; vertical-align: top; }
+  .pv-desc { color: #0f1b2d; font-size: 12.5px; }
+  .pv-amt { text-align: right; font-weight: 600; white-space: nowrap; font-size: 12.5px; }
+  .pv-totals { margin-top: 6px; padding-right: 4px; }
+  .pv-tot {
+    display: flex; justify-content: flex-end; align-items: baseline; gap: 40px;
+    font-size: 12px; padding: 5px 8px; color: #5c6b80;
+  }
+  .pv-tot span:last-child { min-width: 88px; text-align: right; color: #0f1b2d; font-weight: 500; }
+  .pv-tot-strong {
+    color: #0f1b2d; font-weight: 700; font-size: 13px; margin-top: 2px;
+    padding-top: 10px; border-top: 1.5px solid #0f1b2d;
+  }
+  .pv-tot-strong span:last-child { font-weight: 700; font-size: 13.5px; }
+  .pv-hl {
+    margin: 14px 0 4px auto; max-width: 230px;
     background: linear-gradient(135deg, #1b47c4 0%, #2457e6 100%);
-    color: #fff;
-    border-radius: 5px;
-    padding: 11px 14px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    font-size: 12px;
-    font-weight: 500;
+    color: #fff; border-radius: 5px; padding: 11px 14px;
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    font-size: 12px; font-weight: 500;
     box-shadow: 0 2px 8px rgba(36, 87, 230, 0.28);
-  }}
-  .pv-hl strong {{
-    font-size: 15px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -0.01em;
-  }}
-  .pv-section-label {{
-    font-size: 9.5px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #7a8ba0;
-    margin: 18px 0 6px;
-  }}
-  .pv-pay {{
-    font-size: 11.5px;
-    color: #0f1b2d;
-    line-height: 1.55;
-    margin-bottom: 4px;
-  }}
-  .pv-notes {{ margin-top: 4px; }}
-  .pv-note {{
-    color: #5c6b80;
-    font-size: 11.5px;
-    margin: 0 0 5px;
-    line-height: 1.45;
-  }}
-</style>
-<div class="pv-wrap">
-  <div class="pv-sheet">
-    <div class="pv-band"></div>
-    <div class="pv-body">
-      <div class="pv-header">
-        <div>
-          <p class="pv-biz-name">{_esc(m.get("bizName") or "")}</p>
-          {biz}
-        </div>
-        <div>
-          <p class="pv-doc-title">{_esc((m.get("title") or "").upper())}</p>
-          <div class="pv-doc-num">{_esc(m.get("number") or "")}</div>
-        </div>
-      </div>
-      <hr class="pv-divider"/>
-      <div class="pv-two-col">
-        <div>
-          <p class="pv-label">{_esc(m.get("billLabel") or "")}</p>
-          <p class="pv-bill-name">{_esc(m.get("billName") or "")}</p>
-          {bill}
-        </div>
-        <div class="pv-meta">{meta_rows}</div>
-      </div>
-      <p class="pv-job">{_esc(m.get("jobTitle") or "")}</p>
-      {scope}
-      <table class="pv-table">
-        <thead>
-          <tr>
-            <th>Description</th>
-            <th>Amount ({_esc(m.get("currency") or "AUD")})</th>
-          </tr>
-        </thead>
-        <tbody>{lines_html}</tbody>
-      </table>
-      <div class="pv-totals">{totals}</div>
-      {hl}
-      {pay}
-      <hr class="pv-divider"/>
-      <div class="pv-notes">{notes}</div>
-    </div>
-  </div>
-</div>
+  }
+  .pv-hl strong { font-size: 15px; font-weight: 700; }
+  .pv-section-label {
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: #7a8ba0; margin: 18px 0 6px;
+  }
+  .pv-pay { font-size: 11.5px; color: #0f1b2d; line-height: 1.55; margin-bottom: 4px; }
+  .pv-notes { margin-top: 4px; }
+  .pv-note { color: #5c6b80; font-size: 11.5px; margin: 0 0 5px; line-height: 1.45; }
 """
+
+    return (
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"/><style>"
+        + css
+        + "</style></head><body>"
+        '<div class="pv-wrap"><div class="pv-sheet"><div class="pv-band"></div>'
+        '<div class="pv-body">'
+        '<div class="pv-header"><div>'
+        '<p class="pv-biz-name">'
+        + _esc(m.get("bizName") or "")
+        + "</p>"
+        + biz
+        + "</div><div>"
+        '<p class="pv-doc-title">'
+        + _esc((m.get("title") or "").upper())
+        + "</p>"
+        '<div class="pv-doc-num">'
+        + _esc(m.get("number") or "")
+        + "</div></div></div>"
+        '<hr class="pv-divider"/>'
+        '<div class="pv-two-col">'
+        + bill_block
+        + meta_block
+        + "</div>"
+        + job_block
+        + scope
+        + table_block
+        + totals_block
+        + hl
+        + pay
+        + divider_notes
+        + notes_block
+        + "</div></div></div></body></html>"
+    )
 
 
 def _esc(text: Any) -> str:
@@ -1519,6 +1440,7 @@ def _esc(text: Any) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
 
 
 def page_doc():
@@ -1644,7 +1566,8 @@ def page_doc():
     with preview:
         st.markdown("**Preview**")
         st.caption("Live layout — same design as the downloaded PDF.")
-        st.markdown(render_doc_preview(m), unsafe_allow_html=True)
+        import streamlit.components.v1 as components
+        components.html(render_doc_preview(m), height=740, scrolling=True)
 
 
 def page_library():
