@@ -1215,6 +1215,140 @@ def page_job():
             st.toast(f"Saved “{name}”")
 
 
+def render_doc_preview(m: Dict) -> str:
+    """HTML preview that mirrors the PDF layout."""
+    biz = "".join(f"<div class='pv-muted'>{_esc(x)}</div>" for x in m.get("bizLines") or [])
+    bill = "".join(f"<div class='pv-muted'>{_esc(x)}</div>" for x in m.get("billLines") or [])
+    meta_rows = "".join(
+        f"<div class='pv-meta-row'><span class='pv-muted'>{_esc(k)}</span>"
+        f"<span class='pv-meta-val'>{_esc(v)}</span></div>"
+        for k, v in (m.get("meta") or [])
+    )
+    lines = "".join(
+        f"<tr><td>{_esc(d)}</td><td class='pv-amt'>{_esc(a)}</td></tr>"
+        for d, a in (m.get("lines") or [])
+    )
+    totals = ""
+    for label, val, strong in m.get("totals") or []:
+        cls = "pv-tot strong" if strong else "pv-tot"
+        totals += f"<div class='{cls}'><span>{_esc(label)}</span><span>{_esc(val)}</span></div>"
+    hl = ""
+    if m.get("highlight"):
+        hl = (
+            f"<div class='pv-hl'><span>{_esc(m['highlight'][0])}</span>"
+            f"<span class='pv-hl-amt'>{_esc(m['highlight'][1])}</span></div>"
+        )
+    pay = ""
+    if m.get("payment"):
+        pay = (
+            f"<div class='pv-pay-label'>PAYMENT DETAILS</div>"
+            f"<div class='pv-pay'>{_esc(m['payment']).replace(chr(10), '<br/>')}</div>"
+        )
+    notes = "".join(f"<div class='pv-note'>{_esc(n)}</div>" for n in (m.get("notes") or []))
+    scope = ""
+    if m.get("scope"):
+        scope = f"<div class='pv-scope'>{_esc(m['scope']).replace(chr(10), '<br/>')}</div>"
+
+    return f"""
+<style>
+.pv-sheet {{
+  background:#fff; border:1px solid #DDE3EC; border-radius:2px;
+  max-width:520px; margin:0 auto; font-family:Inter,Segoe UI,system-ui,sans-serif;
+  color:#111C2E; font-size:13px; line-height:1.45; overflow:hidden;
+  box-shadow:0 1px 3px rgba(15,27,45,0.06);
+}}
+.pv-band {{ height:6px; background:#2457E6; }}
+.pv-pad {{ padding:28px 32px 24px; }}
+.pv-top {{ display:flex; justify-content:space-between; gap:16px; margin-bottom:18px; }}
+.pv-biz {{ font-size:17px; font-weight:700; letter-spacing:-0.02em; margin-bottom:4px; }}
+.pv-muted {{ color:#66758A; font-size:12px; }}
+.pv-doc-title {{ font-size:22px; font-weight:700; letter-spacing:0.02em; text-align:right; }}
+.pv-doc-num {{ color:#66758A; font-size:13px; text-align:right; margin-top:2px; }}
+.pv-rule {{ border:none; border-top:1px solid #DDE3EC; margin:14px 0; }}
+.pv-cols {{ display:flex; justify-content:space-between; gap:20px; margin-bottom:16px; }}
+.pv-bill-label {{ font-size:10px; font-weight:700; letter-spacing:0.06em; color:#66758A; text-transform:uppercase; margin-bottom:4px; }}
+.pv-bill-name {{ font-size:14px; font-weight:700; margin-bottom:2px; }}
+.pv-meta-row {{ display:flex; justify-content:space-between; gap:24px; font-size:12px; margin-bottom:3px; min-width:160px; }}
+.pv-meta-val {{ font-weight:600; text-align:right; }}
+.pv-job {{ font-size:15px; font-weight:700; margin:4px 0 4px; }}
+.pv-scope {{ color:#66758A; font-size:12px; margin-bottom:14px; }}
+.pv-table {{ width:100%; border-collapse:collapse; margin-bottom:12px; }}
+.pv-table th {{
+  background:#F6F8FB; color:#66758A; font-size:10px; font-weight:700;
+  letter-spacing:0.05em; text-transform:uppercase; text-align:left;
+  padding:8px 10px; border-bottom:1px solid #DDE3EC;
+}}
+.pv-table th:last-child {{ text-align:right; }}
+.pv-table td {{ padding:10px; border-bottom:1px solid #DDE3EC; font-size:13px; }}
+.pv-amt {{ text-align:right; font-weight:600; white-space:nowrap; }}
+.pv-tot {{
+  display:flex; justify-content:flex-end; gap:48px; font-size:13px;
+  padding:4px 0; color:#66758A;
+}}
+.pv-tot span:last-child {{ min-width:90px; text-align:right; color:#111C2E; font-weight:500; }}
+.pv-tot.strong {{
+  color:#111C2E; font-weight:700; font-size:14px;
+  border-top:1px solid #DDE3EC; margin-top:4px; padding-top:8px;
+}}
+.pv-tot.strong span:last-child {{ font-weight:700; }}
+.pv-hl {{
+  margin:12px 0 8px auto; max-width:240px; background:#2457E6; color:#fff;
+  border-radius:4px; padding:10px 14px; display:flex; justify-content:space-between;
+  align-items:center; font-size:13px; font-weight:500;
+}}
+.pv-hl-amt {{ font-size:16px; font-weight:700; }}
+.pv-pay-label {{ font-size:10px; font-weight:700; letter-spacing:0.06em; color:#66758A; margin:14px 0 4px; }}
+.pv-pay {{ font-size:12px; white-space:pre-wrap; margin-bottom:8px; }}
+.pv-note {{ color:#66758A; font-size:12px; margin-top:4px; }}
+</style>
+<div class="pv-sheet">
+  <div class="pv-band"></div>
+  <div class="pv-pad">
+    <div class="pv-top">
+      <div>
+        <div class="pv-biz">{_esc(m.get("bizName") or "")}</div>
+        {biz}
+      </div>
+      <div>
+        <div class="pv-doc-title">{_esc((m.get("title") or "").upper())}</div>
+        <div class="pv-doc-num">{_esc(m.get("number") or "")}</div>
+      </div>
+    </div>
+    <hr class="pv-rule"/>
+    <div class="pv-cols">
+      <div>
+        <div class="pv-bill-label">{_esc(m.get("billLabel") or "")}</div>
+        <div class="pv-bill-name">{_esc(m.get("billName") or "")}</div>
+        {bill}
+      </div>
+      <div>{meta_rows}</div>
+    </div>
+    <div class="pv-job">{_esc(m.get("jobTitle") or "")}</div>
+    {scope}
+    <table class="pv-table">
+      <thead><tr><th>Description</th><th>Amount ({_esc(m.get("currency") or "AUD")})</th></tr></thead>
+      <tbody>{lines}</tbody>
+    </table>
+    {totals}
+    {hl}
+    {pay}
+    <hr class="pv-rule"/>
+    {notes}
+  </div>
+</div>
+"""
+
+
+def _esc(text: Any) -> str:
+    s = str(text or "")
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
 def page_doc():
     S, J = st.session_state.S, st.session_state.J
     r = calc(S, J)
@@ -1336,9 +1470,9 @@ def page_doc():
                 st.code(st.session_state["_copied_msg"], language=None)
 
     with preview:
-        with st.container(border=True):
-            st.markdown("**Preview**")
-            st.code(model_text(m), language=None)
+        st.markdown("**Preview**")
+        st.caption("Live layout — same design as the downloaded PDF.")
+        st.markdown(render_doc_preview(m), unsafe_allow_html=True)
 
 
 def page_library():
