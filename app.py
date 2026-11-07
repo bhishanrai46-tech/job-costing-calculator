@@ -1,47 +1,41 @@
 #!/usr/bin/env python3
 """
-Job Costing & Quotation Calculator  v2.0  (desktop app)
+Job Costing & Quotation Calculator — Streamlit edition
 
-Cost a job, price it to your target margin, manage a job library,
-then produce a professional quote or tax invoice as PDF.
+Cost a job, price it to your target margin, manage a simple job library,
+and download a professional quote or tax invoice as PDF.
 
-Requires:  Python 3.9+   and   pip install reportlab
-Run:       python job_costing_app.py
-Data:      ~/.job_costing/data.json   (auto-migrates from v1)
-
-Keyboard shortcuts:
-  Ctrl+N   New blank job
-  Ctrl+S   Save current job to library
-  Ctrl+L   Go to Job library
-  Ctrl+P   Save PDF
-  Ctrl+E   Open email draft
-  Ctrl+,   Business settings
+Run locally:  streamlit run app.py
+Deploy:       push to GitHub and connect at share.streamlit.io
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import io
 import json
 import math
-import os
-import re
-import sys
 import uuid
-import webbrowser
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
 
-import tkinter as tk
-from tkinter import filedialog, font as tkfont, messagebox, ttk
+import streamlit as st
+
+# Optional PDF (graceful if missing)
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import simpleSplit
+    from reportlab.pdfgen import canvas
+    HAS_REPORTLAB = True
+except ImportError:
+    HAS_REPORTLAB = False
 
 # ---------------------------------------------------------------------------
-# Paths & constants
+# Constants & pure helpers (shared with desktop version)
 # ---------------------------------------------------------------------------
 
-APP_DIR = os.path.join(os.path.expanduser("~"), ".job_costing")
-DATA_FILE = os.path.join(APP_DIR, "data.json")
-APP_VERSION = "2.0"
+APP_VERSION = "2.0-streamlit"
 
 SYMBOLS = {
     "AUD": "$", "NZD": "$", "USD": "$", "CAD": "$",
@@ -49,24 +43,15 @@ SYMBOLS = {
     "HKD": "$", "CHF": "CHF ", "INR": "₹",
 }
 
-NUMERIC_KEYS = {
-    "labourRate", "overheadPct", "overheadHourly", "margin", "minPrice",
-    "roundTo", "travelRate", "taxRate", "validDays", "depositPct",
-    "payTerms", "people", "hours", "km", "travelHours", "gut", "paid",
+SEG_COLORS = {
+    "labour": "#2457E6",
+    "travel": "#0E8A8A",
+    "materials": "#C27A0E",
+    "other": "#7A4FBF",
+    "overhead": "#8393A3",
+    "profit": "#12A266",
 }
 
-SEG_COLORS = [
-    ("labour", "#2457E6"),
-    ("travel", "#0E8A8A"),
-    ("materials", "#C27A0E"),
-    ("other", "#7A4FBF"),
-    ("overhead", "#8393A3"),
-    ("profit", "#12A266"),
-]
-
-# ---------------------------------------------------------------------------
-# Pure helpers
-# ---------------------------------------------------------------------------
 
 def today_stamp() -> str:
     return dt.date.today().strftime("%Y%m%d")
@@ -105,7 +90,6 @@ def lines_of(text: Any) -> List[str]:
 
 
 def parse_date(text: Any) -> dt.date:
-    """Accept YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, or fall back to today."""
     s = str(text or "").strip()
     if not s:
         return dt.date.today()
@@ -231,11 +215,10 @@ def blank_job() -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# Costing engine (pure)
+# Costing engine
 # ---------------------------------------------------------------------------
 
 def calc(s: Dict, j: Dict) -> Dict:
-    """Return a full cost/price breakdown. All values are non-negative where sensible."""
     people = pos(j.get("people"))
     hours = pos(j.get("hours"))
     rate = pos(s.get("labourRate"))
@@ -332,10 +315,6 @@ def doc_lines(j: Dict, r: Dict) -> List[Tuple[str, float]]:
         out.append((name, a))
     return out
 
-
-# ---------------------------------------------------------------------------
-# Document model & PDF
-# ---------------------------------------------------------------------------
 
 def build_model(s: Dict, j: Dict, r: Dict) -> Dict:
     inv = j.get("docType") == "invoice"
@@ -479,12 +458,11 @@ def email_template(s: Dict, j: Dict, m: Dict) -> Tuple[str, str]:
     return subject, "\n".join(b)
 
 
-def make_pdf(m: Dict, path: str) -> None:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.lib.utils import simpleSplit
-    from reportlab.pdfgen import canvas
+def make_pdf_bytes(m: Dict) -> bytes:
+    if not HAS_REPORTLAB:
+        raise RuntimeError("reportlab is not installed")
 
+    buf = io.BytesIO()
     W, H = A4
     ML, MR = 18, 192
     ACC = (36 / 255, 87 / 255, 230 / 255)
@@ -493,7 +471,7 @@ def make_pdf(m: Dict, path: str) -> None:
     RULE = (221 / 255, 227 / 255, 235 / 255)
     SOFT = (244 / 255, 246 / 255, 249 / 255)
 
-    c = canvas.Canvas(path, pagesize=A4)
+    c = canvas.Canvas(buf, pagesize=A4)
     c.setTitle(f"{m['title']} {m['number']}")
     state = {"y": 0.0, "page": 1}
 
@@ -652,2227 +630,736 @@ def make_pdf(m: Dict, path: str) -> None:
 
     footer()
     c.save()
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
-# Storage (v2 with library + migration)
+# Streamlit session helpers
 # ---------------------------------------------------------------------------
 
-def load_data() -> Tuple[Dict, Dict, List[Dict]]:
-    """Return (settings, current_job, library). Migrates v1 data automatically."""
-    s = default_settings()
-    j = sample_job()
-    library: List[Dict] = []
+def inject_styles():
+    st.markdown(
+        """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            d = json.load(f)
-    except (OSError, ValueError, json.JSONDecodeError):
-        return s, j, library
+:root {
+  --ink: #0f172a;
+  --muted: #64748b;
+  --line: #e2e8f0;
+  --soft: #f8fafc;
+  --card: #ffffff;
+  --accent: #1d4ed8;
+  --accent-soft: #eff6ff;
+  --good: #047857;
+  --good-bg: #ecfdf5;
+  --warn: #b45309;
+  --warn-bg: #fffbeb;
+  --bad: #b91c1c;
+  --bad-bg: #fef2f2;
+  --side: #0b1220;
+}
 
-    if not isinstance(d, dict):
-        return s, j, library
+html, body, [class*="css"] {
+  font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color: var(--ink);
+}
 
-    # Settings
-    if "S" in d and isinstance(d["S"], dict):
-        s.update(d["S"])
+.block-container {
+  padding-top: 1.75rem !important;
+  padding-bottom: 3rem !important;
+  max-width: 1180px !important;
+}
 
-    # v2 shape
-    if "version" in d and d.get("version", 1) >= 2:
-        if "current" in d and isinstance(d["current"], dict):
-            j = blank_job()
-            j.update(d["current"])
-        if "library" in d and isinstance(d["library"], list):
-            library = []
-            for item in d["library"]:
-                if isinstance(item, dict) and "job" in item:
-                    library.append(item)
-                elif isinstance(item, dict):  # tolerate flat jobs
-                    entry = {
-                        "id": item.get("id") or new_id(),
-                        "saved_at": item.get("saved_at") or now_iso(),
-                        "name": item.get("library_name") or item.get("title") or "Untitled",
-                        "job": item,
-                    }
-                    library.append(entry)
-    else:
-        # v1 migration
-        if "J" in d and isinstance(d["J"], dict):
-            j = blank_job()
-            j.update(d["J"])
-            j.setdefault("id", new_id())
-            j.setdefault("saved_at", now_iso())
-            # Put the old current job into the library so nothing is lost
-            if j.get("title") or j.get("client"):
-                library.append({
-                    "id": j.get("id") or new_id(),
-                    "saved_at": j.get("saved_at") or now_iso(),
-                    "name": j.get("title") or "Migrated job",
-                    "job": deepcopy(j),
-                })
+/* Sidebar */
+section[data-testid="stSidebar"] {
+  background: var(--side) !important;
+  border-right: 1px solid #1e293b;
+}
+section[data-testid="stSidebar"] * {
+  color: #e2e8f0 !important;
+}
+section[data-testid="stSidebar"] .stRadio label {
+  font-size: 0.92rem !important;
+  font-weight: 500 !important;
+  padding: 0.35rem 0 !important;
+}
+section[data-testid="stSidebar"] hr {
+  border-color: #1e293b !important;
+}
 
-    j.setdefault("materials", [])
-    j.setdefault("other", [])
-    j.setdefault("id", new_id())
-    return s, j, library
+/* Typography */
+h1 {
+  font-size: 1.65rem !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.03em !important;
+  color: var(--ink) !important;
+  margin-bottom: 0.35rem !important;
+}
+h2, h3 {
+  font-weight: 600 !important;
+  letter-spacing: -0.02em !important;
+  color: var(--ink) !important;
+}
+.stCaption, small, .stMarkdown p {
+  color: var(--muted);
+}
+
+/* Cards */
+.jc-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1.15rem 1.25rem;
+  margin-bottom: 0.85rem;
+}
+.jc-card-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.65rem;
+}
+.jc-price {
+  background: linear-gradient(160deg, #0b1220 0%, #1e293b 100%);
+  color: #fff;
+  border-radius: 14px;
+  padding: 1.35rem 1.4rem 1.2rem;
+  margin-bottom: 1rem;
+  border: 1px solid #1e293b;
+}
+.jc-price-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  margin-bottom: 0.25rem;
+}
+.jc-price-value {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 2.35rem;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  color: #fff;
+}
+.jc-price-sub {
+  font-size: 0.88rem;
+  color: #94a3b8;
+  margin-top: 0.35rem;
+}
+.jc-verdict {
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  border: 1px solid transparent;
+}
+.jc-verdict strong { display: block; margin-bottom: 0.2rem; font-weight: 600; }
+.jc-v-good { background: var(--good-bg); color: var(--good); border-color: #a7f3d0; }
+.jc-v-warn { background: var(--warn-bg); color: var(--warn); border-color: #fde68a; }
+.jc-v-bad  { background: var(--bad-bg);  color: var(--bad);  border-color: #fecaca; }
+.jc-v-neutral { background: var(--soft); color: var(--ink); border-color: var(--line); }
+
+.jc-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.9rem;
+}
+.jc-row:last-child { border-bottom: none; }
+.jc-row .lbl { color: var(--ink); }
+.jc-row .val {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-weight: 500;
+  color: var(--ink);
+}
+.jc-row .pct { color: var(--muted); font-size: 0.8rem; margin-left: 0.5rem; min-width: 3.2rem; text-align: right; }
+.jc-row.strong .lbl, .jc-row.strong .val { font-weight: 600; }
+
+.jc-badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  margin-bottom: 0.75rem;
+}
+
+.jc-lib-item {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  margin-bottom: 0.65rem;
+  background: var(--card);
+}
+.jc-lib-name { font-weight: 600; color: var(--ink); font-size: 0.95rem; }
+.jc-lib-meta { color: var(--muted); font-size: 0.82rem; margin-top: 0.15rem; }
+
+div[data-testid="stMetricValue"] {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace !important;
+  font-weight: 600 !important;
+  font-size: 1.25rem !important;
+}
+div[data-testid="stMetricLabel"] {
+  color: var(--muted) !important;
+  font-size: 0.78rem !important;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600 !important;
+}
+
+/* Inputs */
+.stTextInput input, .stNumberInput input, .stTextArea textarea, .stSelectbox [data-baseweb="select"] > div {
+  border-radius: 8px !important;
+  border-color: var(--line) !important;
+  font-family: 'IBM Plex Sans', sans-serif !important;
+}
+.stButton > button {
+  border-radius: 8px !important;
+  font-weight: 600 !important;
+  font-family: 'IBM Plex Sans', sans-serif !important;
+  letter-spacing: -0.01em;
+}
+.stButton > button[kind="primary"] {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+}
+
+/* Hide Streamlit chrome a bit */
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
+header[data-testid="stHeader"] { background: transparent; }
+
+hr { border-color: var(--line) !important; margin: 1.25rem 0 !important; }
+
+.jc-mono {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def save_data(s: Dict, j: Dict, library: List[Dict]) -> None:
-    try:
-        os.makedirs(APP_DIR, exist_ok=True)
-        payload = {
-            "version": 2,
-            "S": s,
-            "current": j,
-            "library": library,
-        }
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-    except OSError:
-        pass
+def init_state():
+    if "S" not in st.session_state:
+        st.session_state.S = default_settings()
+    if "J" not in st.session_state:
+        st.session_state.J = sample_job()
+    if "library" not in st.session_state:
+        st.session_state.library = []
+    if "page" not in st.session_state:
+        st.session_state.page = "Job costing"
 
 
-# ---------------------------------------------------------------------------
-# UI colours & fonts
-# ---------------------------------------------------------------------------
-
-C = dict(
-    side="#0F1B2D",
-    side_hover="#18283F",
-    side_active="#1F3453",
-    side_fg="#C5D0E0",
-    side_muted="#7D8EA6",
-    bg="#F3F5F9",
-    card="#FFFFFF",
-    line="#DDE3EC",
-    field="#C3CDDA",
-    ink="#111C2E",
-    muted="#66758A",
-    accent="#2457E6",
-    accent_dark="#1B47C4",
-    soft="#F6F8FB",
-    good="#0F7A4B",
-    warn="#8F5200",
-    bad="#B3261E",
-    good_bg="#DCF3E7",
-    warn_bg="#FBEBCF",
-    bad_bg="#FBE0DD",
-    neutral_bg="#EEF2F8",
-)
-
-if sys.platform.startswith("win"):
-    FONT, MONO = "Segoe UI", "Consolas"
-elif sys.platform == "darwin":
-    FONT, MONO = "Helvetica Neue", "Menlo"
-else:
-    FONT, MONO = "DejaVu Sans", "DejaVu Sans Mono"
-
-SC = 1.0
-
-
-def px(n: float) -> int:
-    return int(round(n * SC))
-
-
-# ---------------------------------------------------------------------------
-# Widgets
-# ---------------------------------------------------------------------------
-
-def autowrap(label: tk.Label, pad: int = 4) -> tk.Label:
-    label.bind("<Configure>", lambda e: label.config(wraplength=max(80, e.width - pad)))
-    return label
-
-
-class Btn(tk.Label):
-    """Flat button that looks the same on Windows, macOS and Linux."""
-
-    def __init__(self, parent, text, command, kind="secondary"):
-        look = {
-            "primary": (C["accent"], "#FFFFFF", C["accent_dark"], C["accent"]),
-            "secondary": (C["card"], C["ink"], C["soft"], C["field"]),
-            "danger": (C["card"], C["bad"], C["bad_bg"], C["field"]),
-        }[kind]
-        self.look, self.command = look, command
-        super().__init__(
-            parent,
-            text=text,
-            bg=look[0],
-            fg=look[1],
-            font=(FONT, 10, "bold"),
-            padx=px(16),
-            pady=px(7),
-            cursor="hand2",
-            highlightthickness=1,
-            highlightbackground=look[3],
-            bd=0,
+def verdict_text(s: Dict, j: Dict, r: Dict) -> Tuple[str, str, str]:
+    gut = pos(j.get("gut"))
+    M = lambda v: money(s, v)
+    if r["cost"] <= 0:
+        return "neutral", "Add job costs first", "Enter labour, travel or materials to compare against your usual price."
+    if gut <= 0:
+        return "neutral", "Enter your usual price", "Type what you would quote by gut feel to see the real margin."
+    if gut < r["direct"]:
+        return "bad", "You would lose money", (
+            f"{M(gut)} does not cover direct costs of {M(r['direct'])}. "
+            f"Shortfall {M(r['direct'] - gut)} before overhead."
         )
-        self.bind("<Enter>", lambda e: self.config(bg=self.look[2]))
-        self.bind("<Leave>", lambda e: self.config(bg=self.look[0]))
-        self.bind("<ButtonRelease-1>", self._click)
+    if gut < r["cost"]:
+        return "bad", "Overhead not covered", (
+            f"{M(gut)} covers the work but leaves {M(r['cost'] - gut)} of overhead unpaid."
+        )
+    if gut < r["price"] - 0.004:
+        gp = gut - r["cost"]
+        return "warn", "Below target margin", (
+            f"{M(gut)} → {M(gp)} profit ({gp / gut * 100:.1f}% vs {r['target'] * 100:.1f}% target). "
+            f"{M(r['price'] - gut)} short of recommended."
+        )
+    gp = gut - r["cost"]
+    return "good", "On target", f"{M(gut)} → {M(gp)} profit ({gp / gut * 100:.1f}% margin)."
 
-    def _click(self, e):
-        if 0 <= e.x <= self.winfo_width() and 0 <= e.y <= self.winfo_height():
-            self.command()
+
+def _breakdown_rows(r: Dict, M) -> str:
+    rows = [
+        ("Labour", r["labour"], False),
+        ("Travel", r["travel"], False),
+        ("Materials", r["materials"], False),
+        ("Other", r["other"], False),
+        ("Direct costs", r["direct"], True),
+        ("Overhead", r["overhead"], False),
+        ("Total cost", r["cost"], True),
+        ("Profit", r["profit"], False),
+        ("Quote price", r["price"], True),
+    ]
+    html = []
+    for label, val, strong in rows:
+        pct = f"{val / r['price'] * 100:.1f}%" if r["price"] > 0 else ""
+        cls = "jc-row strong" if strong else "jc-row"
+        html.append(
+            f'<div class="{cls}"><span class="lbl">{label}</span>'
+            f'<span><span class="val">{M(val)}</span>'
+            f'<span class="pct">{pct}</span></span></div>'
+        )
+    return "\n".join(html)
 
 
-class Seg(tk.Frame):
-    """Segmented control bound to a StringVar."""
+def page_job():
+    S = st.session_state.S
+    J = st.session_state.J
+    r = calc(S, J)
+    M = lambda v: money(S, v)
 
-    def __init__(self, parent, var, options):
-        super().__init__(parent, bg=C["neutral_bg"], padx=3, pady=3)
-        self.var, self.items = var, {}
-        for value, text in options:
-            b = tk.Label(
-                self,
-                text=text,
-                font=(FONT, 10, "bold"),
-                padx=px(16),
-                pady=px(6),
-                cursor="hand2",
-                bd=0,
+    title = J.get("title") or "New job"
+    st.markdown(f"<div class='jc-badge'>Job costing</div>", unsafe_allow_html=True)
+    st.markdown(f"# {title}")
+    if J.get("sample"):
+        st.caption("Sample job loaded — adjust any figure to cost your own work.")
+
+    left, right = st.columns([1.4, 1], gap="large")
+
+    with left:
+        with st.container(border=True):
+            st.markdown("##### Job details")
+            c1, c2 = st.columns(2)
+            with c1:
+                J["title"] = st.text_input("Job title", J.get("title") or "", placeholder="e.g. End-of-lease clean")
+            with c2:
+                J["client"] = st.text_input("Customer", J.get("client") or "", placeholder="Customer name")
+            J["scope"] = st.text_area("Scope of work", J.get("scope") or "", height=90, placeholder="What's included and excluded")
+
+        with st.container(border=True):
+            st.markdown("##### Labour")
+            c1, c2 = st.columns(2)
+            with c1:
+                J["people"] = st.number_input("People", min_value=0.0, value=float(J.get("people") or 1), step=1.0)
+            with c2:
+                J["hours"] = st.number_input("Hours on site (each)", min_value=0.0, value=float(J.get("hours") or 0), step=0.25)
+            if r["on_site"]:
+                st.caption(f"{r['on_site']:.2f} hrs on site × {M(pos(S.get('labourRate')))}/hr")
+
+        with st.container(border=True):
+            st.markdown("##### Travel")
+            c1, c2 = st.columns(2)
+            with c1:
+                J["km"] = st.number_input("Return distance (km)", min_value=0.0, value=float(J.get("km") or 0), step=1.0)
+            with c2:
+                J["travelHours"] = st.number_input("Return travel time (hrs)", min_value=0.0, value=float(J.get("travelHours") or 0), step=0.25)
+            st.caption(f"Vehicle {M(r['vehicle'])} · travel time {M(r['travel_time'])} (paid to every person)")
+
+        with st.container(border=True):
+            st.markdown("##### Materials")
+            mats = J.get("materials") or []
+            mat_data = [{"Item": m.get("d", ""), "Qty": float(m.get("q", 1) or 1), "Unit cost": float(m.get("c", 0) or 0)} for m in mats]
+            edited = st.data_editor(
+                mat_data if mat_data else [{"Item": "", "Qty": 1.0, "Unit cost": 0.0}],
+                num_rows="dynamic",
+                use_container_width=True,
+                key="mats_ed",
+                column_config={
+                    "Item": st.column_config.TextColumn("Item", width="medium"),
+                    "Qty": st.column_config.NumberColumn("Qty", min_value=0, step=1, format="%.2f"),
+                    "Unit cost": st.column_config.NumberColumn("Unit cost", min_value=0, format="%.2f"),
+                },
             )
-            b.pack(side="left", padx=(0, 3))
-            b.bind("<Button-1>", lambda e, v=value: var.set(v))
-            self.items[value] = b
-        var.trace_add("write", lambda *_: self.paint())
-        self.paint()
+            J["materials"] = [
+                {"d": (row.get("Item") or "").strip(), "q": pos(row.get("Qty")), "c": pos(row.get("Unit cost"))}
+                for row in edited
+                if (row.get("Item") or "").strip() or pos(row.get("Unit cost")) > 0
+            ]
 
-    def paint(self):
-        for value, b in self.items.items():
-            on = self.var.get() == value
-            b.config(
-                bg=C["card"] if on else C["neutral_bg"],
-                fg=C["ink"] if on else C["muted"],
+        with st.container(border=True):
+            st.markdown("##### Other costs")
+            oths = J.get("other") or []
+            oth_data = [{"Description": o.get("d", ""), "Amount": float(o.get("a", 0) or 0)} for o in oths]
+            edited_o = st.data_editor(
+                oth_data if oth_data else [{"Description": "", "Amount": 0.0}],
+                num_rows="dynamic",
+                use_container_width=True,
+                key="oths_ed",
+                column_config={
+                    "Description": st.column_config.TextColumn("Description", width="large"),
+                    "Amount": st.column_config.NumberColumn("Amount", min_value=0, format="%.2f"),
+                },
             )
-
-
-class ScrollFrame(tk.Frame):
-    def __init__(self, parent, bg):
-        super().__init__(parent, bg=bg)
-        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
-        self.sb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.inner = tk.Frame(self.canvas, bg=bg)
-        self.win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.inner.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
-        )
-        self.canvas.bind(
-            "<Configure>",
-            lambda e: self.canvas.itemconfigure(self.win, width=e.width),
-        )
-        self.canvas.configure(yscrollcommand=self.sb.set)
-        self.sb.pack(side="right", fill="y")
-        self.canvas.pack(side="left", fill="both", expand=True)
-
-
-# ---------------------------------------------------------------------------
-# Main application
-# ---------------------------------------------------------------------------
-
-class App(tk.Tk):
-    def __init__(self):
-        if sys.platform.startswith("win"):
-            try:
-                import ctypes
-                ctypes.windll.shcore.SetProcessDpiAwareness(1)
-            except Exception:
-                pass
-
-        super().__init__()
-        global SC
-        SC = max(1.0, self.winfo_fpixels("1i") / 96.0)
-
-        self.title(f"Job Costing & Quotation Calculator  v{APP_VERSION}")
-        self.configure(bg=C["bg"])
-        w, h = px(1280), px(840)
-        self.geometry(
-            f"{w}x{h}+{max(0, (self.winfo_screenwidth() - w) // 2)}+"
-            f"{max(0, (self.winfo_screenheight() - h) // 3)}"
-        )
-        self.minsize(px(1080), px(720))
-
-        self.S, self.J, self.library = load_data()
-        self.vars: Dict[Tuple[str, str], Tuple[Any, str]] = {}
-        self.pages: Dict[str, tk.Frame] = {}
-        self.navs: Dict[str, Tuple] = {}
-        self._busy = False
-        self.r: Optional[Dict] = None
-        self.model: Optional[Dict] = None
-        self.current = "job"
-        self._lib_filter = ""
-        self._cur_labels: List[tk.Label] = []
-
-        self._ttk_style()
-        self._menu()
-        self._shell()
-        self.fill_all()
-        self.refresh()
-        self.show("job")
-
-        self.bind_all("<MouseWheel>", self._wheel)
-        self.bind_all("<Button-4>", self._wheel)
-        self.bind_all("<Button-5>", self._wheel)
-
-        # Keyboard shortcuts
-        self.bind_all("<Control-n>", lambda e: self.new_blank())
-        self.bind_all("<Control-N>", lambda e: self.new_blank())
-        self.bind_all("<Control-s>", lambda e: self.save_to_library())
-        self.bind_all("<Control-S>", lambda e: self.save_to_library())
-        self.bind_all("<Control-l>", lambda e: self.show("lib"))
-        self.bind_all("<Control-L>", lambda e: self.show("lib"))
-        self.bind_all("<Control-p>", lambda e: self.save_pdf())
-        self.bind_all("<Control-P>", lambda e: self.save_pdf())
-        self.bind_all("<Control-e>", lambda e: self.open_email())
-        self.bind_all("<Control-E>", lambda e: self.open_email())
-        self.bind_all("<Control-comma>", lambda e: self.show("set"))
-
-    # ----- styling ---------------------------------------------------------
-
-    def _ttk_style(self):
-        st = ttk.Style(self)
-        try:
-            st.theme_use("clam")
-        except tk.TclError:
-            pass
-        st.configure(
-            "Treeview",
-            rowheight=px(30),
-            font=(FONT, 10),
-            background=C["card"],
-            fieldbackground=C["card"],
-            foreground=C["ink"],
-            borderwidth=0,
-            relief="flat",
-        )
-        st.configure(
-            "Treeview.Heading",
-            font=(FONT, 9, "bold"),
-            background=C["soft"],
-            foreground=C["muted"],
-            relief="flat",
-            borderwidth=0,
-            padding=(8, 6),
-        )
-        st.map(
-            "Treeview",
-            background=[("selected", "#E3EBFC")],
-            foreground=[("selected", C["ink"])],
-        )
-        st.map("Treeview.Heading", background=[("active", C["soft"])])
-        st.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
-        st.configure(
-            "Vertical.TScrollbar",
-            background="#C9D2DE",
-            troughcolor=C["bg"],
-            bordercolor=C["bg"],
-            arrowcolor=C["bg"],
-            lightcolor="#C9D2DE",
-            darkcolor="#C9D2DE",
-            gripcount=0,
-            relief="flat",
-            arrowsize=px(12),
-        )
-        st.map("Vertical.TScrollbar", background=[("active", "#AEB9C8")])
-        st.configure(
-            "Card.TCheckbutton",
-            background=C["card"],
-            foreground=C["ink"],
-            font=(FONT, 10),
-        )
-        st.map("Card.TCheckbutton", background=[("active", C["card"])])
-
-    def _menu(self):
-        mb = tk.Menu(self)
-
-        f = tk.Menu(mb, tearoff=0)
-        f.add_command(label="New blank job", command=self.new_blank, accelerator="Ctrl+N")
-        f.add_command(label="Load sample job", command=self.load_sample)
-        f.add_separator()
-        f.add_command(
-            label="Save current job to library…",
-            command=self.save_to_library,
-            accelerator="Ctrl+S",
-        )
-        f.add_command(label="Job library", command=lambda: self.show("lib"), accelerator="Ctrl+L")
-        f.add_separator()
-        f.add_command(
-            label="Save quote or invoice as PDF…",
-            command=self.save_pdf,
-            accelerator="Ctrl+P",
-        )
-        f.add_separator()
-        f.add_command(label="Export backup…", command=self.export_backup)
-        f.add_command(label="Import backup…", command=self.import_backup)
-        f.add_command(label="Open data folder", command=self.open_data_folder)
-        f.add_separator()
-        f.add_command(label="Exit", command=self.destroy)
-        mb.add_cascade(label="File", menu=f)
-
-        h = tk.Menu(mb, tearoff=0)
-        h.add_command(label="Where is my data stored?", command=self.where_data)
-        h.add_command(
-            label="About",
-            command=lambda: messagebox.showinfo(
-                "About",
-                f"Job Costing & Quotation Calculator  v{APP_VERSION}\n\n"
-                "Cost a job, price it to your target margin, manage a job library,\n"
-                "then send a quote or tax invoice as a PDF.\n\n"
-                "Data stays on this computer. Nothing is sent over the internet.",
-            ),
-        )
-        mb.add_cascade(label="Help", menu=h)
-        self.config(menu=mb)
-
-    # ----- shell -----------------------------------------------------------
-
-    def _shell(self):
-        status = tk.Frame(self, bg=C["card"], highlightthickness=1, highlightbackground=C["line"])
-        status.pack(side="bottom", fill="x")
-        self.lbl_saved = tk.Label(
-            status, text="", bg=C["card"], fg=C["muted"], font=(FONT, 9), padx=px(14), pady=px(5)
-        )
-        self.lbl_saved.pack(side="left")
-        tk.Label(
-            status,
-            text="Data:  " + DATA_FILE,
-            bg=C["card"],
-            fg=C["muted"],
-            font=(FONT, 9),
-            padx=px(14),
-        ).pack(side="right")
-
-        side = tk.Frame(self, bg=C["side"], width=px(232))
-        side.pack(side="left", fill="y")
-        side.pack_propagate(False)
-
-        brand = tk.Frame(side, bg=C["side"])
-        brand.pack(fill="x", padx=px(18), pady=(px(24), px(26)))
-        mark = tk.Canvas(brand, width=px(34), height=px(34), bg=C["side"], highlightthickness=0)
-        mark.pack(side="left")
-        mark.create_rectangle(0, 0, px(34), px(34), fill=C["accent"], outline="")
-        for i, wd in enumerate((18, 12, 7)):
-            y = px(10 + i * 7)
-            mark.create_line(px(9), y, px(9 + wd), y, fill="white", width=px(2.4))
-        tx = tk.Frame(brand, bg=C["side"])
-        tx.pack(side="left", padx=(px(10), 0))
-        tk.Label(tx, text="Job Costing", bg=C["side"], fg="white", font=(FONT, 12, "bold")).pack(
-            anchor="w"
-        )
-        tk.Label(
-            tx, text="Quotation Calculator", bg=C["side"], fg=C["side_muted"], font=(FONT, 9)
-        ).pack(anchor="w")
-
-        for key, label in (
-            ("job", "Job costing"),
-            ("doc", "Quote & invoice"),
-            ("lib", "Job library"),
-            ("set", "Business settings"),
-        ):
-            item = tk.Frame(side, bg=C["side"], cursor="hand2")
-            item.pack(fill="x")
-            bar = tk.Frame(item, bg=C["side"], width=px(4))
-            bar.pack(side="left", fill="y")
-            lab = tk.Label(
-                item,
-                text=label,
-                bg=C["side"],
-                fg=C["side_fg"],
-                font=(FONT, 11, "bold"),
-                anchor="w",
-                padx=px(18),
-                pady=px(12),
-                cursor="hand2",
-            )
-            lab.pack(side="left", fill="x", expand=True)
-            for wdg in (item, lab, bar):
-                wdg.bind("<Button-1>", lambda e, k=key: self.show(k))
-                wdg.bind("<Enter>", lambda e, k=key: self._nav_hover(k, True))
-                wdg.bind("<Leave>", lambda e, k=key: self._nav_hover(k, False))
-            self.navs[key] = (item, lab, bar)
-
-        foot = tk.Frame(side, bg=C["side"])
-        foot.pack(side="bottom", fill="x", padx=px(18), pady=px(18))
-        tk.Frame(foot, bg="#1E3049", height=1).pack(fill="x", pady=(0, px(12)))
-        self.lbl_side_biz = tk.Label(
-            foot,
-            text="",
-            bg=C["side"],
-            fg="white",
-            font=(FONT, 10, "bold"),
-            anchor="w",
-            wraplength=px(190),
-            justify="left",
-        )
-        self.lbl_side_biz.pack(anchor="w")
-        self.lbl_side_lib = tk.Label(
-            foot, text="", bg=C["side"], fg=C["side_muted"], font=(FONT, 9)
-        )
-        self.lbl_side_lib.pack(anchor="w")
-
-        self.content = tk.Frame(self, bg=C["bg"])
-        self.content.pack(side="left", fill="both", expand=True)
-
-        self.pages["job"] = self._page_job(self.content)
-        self.pages["doc"] = self._page_doc(self.content)
-        self.pages["lib"] = self._page_library(self.content)
-        self.pages["set"] = self._page_settings(self.content)
-
-    def _nav_hover(self, key, on):
-        if key == self.current:
-            return
-        bg = C["side_hover"] if on else C["side"]
-        item, lab, bar = self.navs[key]
-        for w in (item, lab):
-            w.config(bg=bg)
-
-    def show(self, key):
-        self.current = key
-        for k, page in self.pages.items():
-            page.pack_forget()
-            item, lab, bar = self.navs[k]
-            on = k == key
-            for w in (item, lab):
-                w.config(bg=C["side_active"] if on else C["side"])
-            lab.config(fg="white" if on else C["side_fg"])
-            bar.config(bg=C["accent"] if on else C["side"])
-        self.pages[key].pack(fill="both", expand=True, padx=px(28), pady=(px(22), px(14)))
-        if key == "lib":
-            self.refresh_library()
-
-    def _wheel(self, e):
-        w = self.winfo_containing(e.x_root, e.y_root)
-        while w is not None and not isinstance(w, ScrollFrame):
-            w = w.master
-        if w is None:
-            return
-        lo, hi = w.canvas.yview()
-        if lo <= 0.0 and hi >= 1.0:
-            return
-        step = -1 if (e.num == 4 or getattr(e, "delta", 0) > 0) else 1
-        w.canvas.yview_scroll(step * 2, "units")
-
-    # ----- building blocks -------------------------------------------------
-
-    def head(self, parent, crumb, title, buttons=()):
-        h = tk.Frame(parent, bg=C["bg"])
-        h.pack(fill="x", pady=(0, px(16)))
-        left = tk.Frame(h, bg=C["bg"])
-        left.pack(side="left")
-        tk.Label(
-            left, text=crumb.upper(), bg=C["bg"], fg=C["accent"], font=(FONT, 9, "bold")
-        ).pack(anchor="w")
-        lbl = tk.Label(left, text=title, bg=C["bg"], fg=C["ink"], font=(FONT, 20, "bold"))
-        lbl.pack(anchor="w")
-        right = tk.Frame(h, bg=C["bg"])
-        right.pack(side="right", anchor="s")
-        for b in buttons:
-            b(right).pack(side="left", padx=(px(8), 0))
-        return lbl
-
-    def card(self, parent, title, sub=None, chip=False, pad_bottom=14):
-        outer = tk.Frame(
-            parent, bg=C["card"], highlightthickness=1, highlightbackground=C["line"]
-        )
-        outer.pack(fill="x", pady=(0, px(pad_bottom)))
-        top = tk.Frame(outer, bg=C["card"])
-        top.pack(fill="x", padx=px(20), pady=(px(16), 0))
-        tk.Label(top, text=title, bg=C["card"], fg=C["ink"], font=(FONT, 12, "bold")).pack(
-            side="left"
-        )
-        chip_lbl = None
-        if chip:
-            chip_lbl = tk.Label(
-                top,
-                text="",
-                bg=C["neutral_bg"],
-                fg=C["ink"],
-                font=(FONT, 10, "bold"),
-                padx=px(10),
-                pady=px(2),
-            )
-            chip_lbl.pack(side="right")
-        if sub:
-            sub_lbl = tk.Label(
-                outer,
-                text=sub,
-                bg=C["card"],
-                fg=C["muted"],
-                font=(FONT, 9),
-                anchor="w",
-                justify="left",
-            )
-            sub_lbl.pack(anchor="w", padx=px(20), pady=(px(2), 0))
-        body = tk.Frame(outer, bg=C["card"])
-        body.pack(fill="x", padx=px(20), pady=(px(12), px(18)))
-        body.chip = chip_lbl
-        body.sub = sub_lbl if sub else None
-        return body
-
-    def bind_var(self, store, key):
-        v = tk.StringVar()
-        self.vars[(store, key)] = (v, "str")
-        if key == "emailSubject":
-            v.trace_add(
-                "write",
-                lambda *_: None
-                if self._busy
-                else (self.J.__setitem__("emailEdited", True), self.on_change()),
-            )
-        else:
-            v.trace_add("write", lambda *_: self.on_change())
-        return v
-
-    def field(
-        self,
-        parent,
-        store,
-        key,
-        label,
-        unit="",
-        prefix="",
-        hint="",
-        width=10,
-        text=False,
-        height=3,
-    ):
-        f = tk.Frame(parent, bg=C["card"])
-        tk.Label(
-            f, text=label, bg=C["card"], fg=C["ink"], font=(FONT, 9, "bold"), anchor="w"
-        ).pack(anchor="w", pady=(0, px(4)))
-        box = tk.Frame(f, bg=C["card"], highlightthickness=1, highlightbackground=C["field"])
-        box.pack(fill="x")
-        if text:
-            t = tk.Text(
-                box,
-                height=height,
-                width=width,
-                wrap="word",
-                font=(FONT, 10),
-                relief="flat",
-                bd=0,
-                bg=C["card"],
-                fg=C["ink"],
-                insertbackground=C["ink"],
-                highlightthickness=0,
-                padx=px(8),
-                pady=px(6),
-                undo=True,
-            )
-            t.pack(fill="x")
-            t.bind("<KeyRelease>", lambda e: self.on_text(key))
-            t.bind("<FocusIn>", lambda e: box.config(highlightbackground=C["accent"]))
-            t.bind("<FocusOut>", lambda e: box.config(highlightbackground=C["field"]))
-            self.vars[(store, key)] = (t, "text")
-        else:
-            if prefix:
-                pl = tk.Label(
-                    box, text=prefix, bg=C["soft"], fg=C["muted"], font=(FONT, 10), padx=px(10)
-                )
-                pl.pack(side="left", fill="y")
-                self._cur_labels.append(pl)
-            v = self.bind_var(store, key)
-            e = tk.Entry(
-                box,
-                textvariable=v,
-                relief="flat",
-                bd=0,
-                font=(FONT, 11),
-                bg=C["card"],
-                fg=C["ink"],
-                insertbackground=C["ink"],
-                highlightthickness=0,
-                width=width,
-            )
-            e.pack(side="left", fill="x", expand=True, ipady=px(6), padx=px(8))
-            if unit:
-                tk.Label(
-                    box,
-                    text=unit,
-                    bg=C["soft"],
-                    fg=C["muted"],
-                    font=(FONT, 9, "bold"),
-                    padx=px(10),
-                ).pack(side="right", fill="y")
-            e.bind(
-                "<FocusIn>",
-                lambda ev, b=box, en=e: (
-                    b.config(highlightbackground=C["accent"]),
-                    en.after_idle(lambda: en.select_range(0, "end")),
-                ),
-            )
-            e.bind("<FocusOut>", lambda ev, b=box: b.config(highlightbackground=C["field"]))
-        if hint:
-            autowrap(
-                tk.Label(
-                    f,
-                    text=hint,
-                    bg=C["card"],
-                    fg=C["muted"],
-                    font=(FONT, 9),
-                    justify="left",
-                    anchor="w",
-                )
-            ).pack(fill="x", pady=(px(4), 0))
-        return f
-
-    def frow(self, body, specs, last=False):
-        row = tk.Frame(body, bg=C["card"])
-        row.pack(fill="x", pady=(0, 0 if last else px(12)))
-        for i, sp in enumerate(specs):
-            self.field(row, **sp).pack(
-                side="left",
-                fill="x",
-                expand=True,
-                padx=(0 if i == 0 else px(14), 0),
-                anchor="n",
-            )
-        return row
-
-    def make_list(self, parent, title, sub, key, cols):
-        body = self.card(parent, title, sub, chip=True)
-        tree = ttk.Treeview(
-            body, columns=[c[0] for c in cols], show="headings", height=3, selectmode="browse"
-        )
-        for cid, head, w, anc in cols:
-            tree.heading(cid, text=head, anchor=anc)
-            tree.column(cid, width=px(w), anchor=anc, stretch=(cid == "d"))
-        tree.pack(fill="x")
-        form = tk.Frame(body, bg=C["card"])
-        form.pack(fill="x", pady=(px(12), 0))
-        ents = {}
-        for cid, head, w, anc in cols:
-            fr = tk.Frame(form, bg=C["card"])
-            fr.pack(side="left", padx=(0, px(8)), fill="x", expand=(cid == "d"))
-            tk.Label(fr, text=head, bg=C["card"], fg=C["muted"], font=(FONT, 9, "bold")).pack(
-                anchor="w"
-            )
-            box = tk.Frame(
-                fr, bg=C["card"], highlightthickness=1, highlightbackground=C["field"]
-            )
-            box.pack(fill="x")
-            e = tk.Entry(
-                box,
-                relief="flat",
-                bd=0,
-                font=(FONT, 10),
-                bg=C["card"],
-                fg=C["ink"],
-                highlightthickness=0,
-                width=(20 if cid == "d" else 9),
-            )
-            e.pack(fill="x", ipady=px(5), padx=px(8))
-            e.bind("<FocusIn>", lambda ev, b=box: b.config(highlightbackground=C["accent"]))
-            e.bind("<FocusOut>", lambda ev, b=box: b.config(highlightbackground=C["field"]))
-            e.bind("<Return>", lambda ev, k=key, es=ents: self.add_row(k, es))
-            ents[cid] = e
-        btns = tk.Frame(form, bg=C["card"])
-        btns.pack(side="left", anchor="s")
-        Btn(btns, "Add", lambda k=key, es=ents: self.add_row(k, es), "primary").pack(
-            side="left", padx=(0, px(6))
-        )
-        Btn(btns, "Remove", lambda k=key, t=tree: self.remove_row(k, t)).pack(side="left")
-        return tree, body.chip
-
-    # ----- pages -----------------------------------------------------------
-
-    def _page_job(self, parent):
-        page = tk.Frame(parent, bg=C["bg"])
-        self.lbl_jobhead = self.head(
-            page,
-            "Job costing",
-            "New job",
-            [
-                lambda p: Btn(p, "New blank job", self.new_blank),
-                lambda p: Btn(p, "Save to library", self.save_to_library, "primary"),
-                lambda p: Btn(p, "Load sample", self.load_sample),
-            ],
-        )
-        self.banner = tk.Label(
-            page,
-            text=(
-                "Sample job loaded. A two-person end-of-lease clean that a gut-feel quote "
-                "would underprice. Change any figure to cost your own job."
-            ),
-            bg="#E8EEFD",
-            fg=C["ink"],
-            font=(FONT, 10),
-            anchor="w",
-            padx=px(14),
-            pady=px(8),
-            justify="left",
-        )
-        autowrap(self.banner, 28)
-
-        body = tk.Frame(page, bg=C["bg"])
-        body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, minsize=px(390))
-        body.rowconfigure(0, weight=1)
-
-        left = ScrollFrame(body, C["bg"])
-        left.grid(row=0, column=0, sticky="nsew")
-        rscroll = ScrollFrame(body, C["bg"])
-        rscroll.grid(row=0, column=1, sticky="nsew", padx=(px(20), 0))
-        right = rscroll.inner
-        L = left.inner
-
-        b = self.card(L, "Job details", "Shown on the quote and invoice.")
-        self.frow(
-            b,
-            [
-                dict(store="J", key="title", label="Job title", width=22),
-                dict(store="J", key="client", label="Customer", width=16),
-            ],
-        )
-        self.frow(
-            b,
-            [dict(store="J", key="scope", label="Scope of work", text=True, height=3, width=30)],
-            last=True,
-        )
-
-        b = self.card(L, "Labour", None, chip=True)
-        self.chip_labour = b.chip
-        self.frow(
-            b,
-            [
-                dict(store="J", key="people", label="People on the job", unit="people", width=6),
-                dict(store="J", key="hours", label="Hours on site, each", unit="hrs", width=6),
-            ],
-        )
-        self.lbl_labour = tk.Label(
-            b, text="", bg=C["card"], fg=C["muted"], font=(FONT, 9), anchor="w"
-        )
-        self.lbl_labour.pack(anchor="w")
-
-        b = self.card(L, "Travel", None, chip=True)
-        self.chip_travel = b.chip
-        self.frow(
-            b,
-            [
-                dict(store="J", key="km", label="Distance, return trip", unit="km", width=6),
-                dict(
-                    store="J",
-                    key="travelHours",
-                    label="Travel time, return trip",
-                    unit="hrs",
-                    width=6,
-                ),
-            ],
-        )
-        self.lbl_travel = autowrap(
-            tk.Label(
-                b, text="", bg=C["card"], fg=C["muted"], font=(FONT, 9), anchor="w", justify="left"
-            )
-        )
-        self.lbl_travel.pack(fill="x")
-
-        self.tree_mat, self.chip_mat = self.make_list(
-            L,
-            "Materials & supplies",
-            "Everything you buy for this job.",
-            "materials",
-            [
-                ("d", "Item", 260, "w"),
-                ("q", "Qty", 70, "e"),
-                ("c", "Unit cost", 100, "e"),
-            ],
-        )
-        self.tree_oth, self.chip_oth = self.make_list(
-            L,
-            "Other costs",
-            "Equipment hire, subcontractors, tip fees and permits.",
-            "other",
-            [("d", "Description", 330, "w"), ("a", "Amount", 110, "e")],
-        )
-
-        # summary hero
-        hero = tk.Frame(right, bg=C["side"])
-        hero.pack(fill="x", pady=(0, px(14)))
-        hi = tk.Frame(hero, bg=C["side"])
-        hi.pack(fill="x", padx=px(22), pady=px(18))
-        self.lbl_priceLab = tk.Label(
-            hi, text="", bg=C["side"], fg="#93A4BB", font=(FONT, 9, "bold")
-        )
-        self.lbl_priceLab.pack(anchor="w")
-        self.lbl_price = tk.Label(
-            hi, text="", bg=C["side"], fg="white", font=(FONT, 34, "bold")
-        )
-        self.lbl_price.pack(anchor="w")
-        self.lbl_taxline = tk.Label(hi, text="", bg=C["side"], fg="#93A4BB", font=(FONT, 10))
-        self.lbl_taxline.pack(anchor="w")
-        self.lbl_flag = autowrap(
-            tk.Label(
-                hi, text="", bg=C["side"], fg="#F0B25C", font=(FONT, 9), justify="left", anchor="w"
-            )
+            J["other"] = [
+                {"d": (row.get("Description") or "").strip(), "a": pos(row.get("Amount"))}
+                for row in edited_o
+                if (row.get("Description") or "").strip() or pos(row.get("Amount")) > 0
+            ]
+
+    with right:
+        tax_note = f"excl. {(S.get('taxName') or 'tax')}" if S.get("taxOn") else "total"
+        st.markdown(
+            f"""
+            <div class="jc-price">
+              <div class="jc-price-label">Recommended quote · {tax_note}</div>
+              <div class="jc-price-value">{M(r["price"])}</div>
+              <div class="jc-price-sub">
+                {(S.get("taxName") or "Tax") + " " + M(r["tax"]) + "  ·  Total " + M(r["total"]) if S.get("taxOn") else "Total " + M(r["total"])}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        self.lbl_flag.pack(fill="x")
-        tk.Frame(hi, bg="#263A52", height=1).pack(fill="x", pady=(px(12), px(10)))
-        grid = tk.Frame(hi, bg=C["side"])
-        grid.pack(fill="x")
-        grid.columnconfigure(0, weight=1)
-        grid.columnconfigure(1, weight=1)
-        self.stat = {}
-        for i, (k, lab) in enumerate(
-            (
-                ("cost", "TOTAL COST"),
-                ("profit", "PROFIT"),
-                ("margin", "MARGIN"),
-                ("pph", "PROFIT PER HOUR"),
-            )
-        ):
-            cell = tk.Frame(grid, bg=C["side"])
-            cell.grid(row=i // 2, column=i % 2, sticky="w", pady=px(4))
-            tk.Label(cell, text=lab, bg=C["side"], fg="#93A4BB", font=(FONT, 8, "bold")).pack(
-                anchor="w"
-            )
-            self.stat[k] = tk.Label(
-                cell, text="", bg=C["side"], fg="white", font=(FONT, 14, "bold")
-            )
-            self.stat[k].pack(anchor="w")
 
-        b = self.card(right, "Compare with your usual quote")
-        self.frow(
-            b, [dict(store="J", key="gut", label="Your usual quote, before tax", prefix="$", width=10)]
-        )
-        self.verd = tk.Frame(b, bg=C["neutral_bg"])
-        self.verd.pack(fill="x")
-        self.lbl_vhead = tk.Label(
-            self.verd,
-            text="",
-            bg=C["neutral_bg"],
-            fg=C["ink"],
-            font=(FONT, 10, "bold"),
-            anchor="w",
-            justify="left",
-        )
-        autowrap(self.lbl_vhead)
-        self.lbl_vhead.pack(fill="x", padx=px(12), pady=(px(10), 0))
-        self.lbl_vbody = tk.Label(
-            self.verd,
-            text="",
-            bg=C["neutral_bg"],
-            fg=C["ink"],
-            font=(FONT, 10),
-            anchor="w",
-            justify="left",
-        )
-        autowrap(self.lbl_vbody)
-        self.lbl_vbody.pack(fill="x", padx=px(12), pady=(px(2), px(10)))
-
-        b = self.card(right, "Where the price goes", pad_bottom=0)
-        self.bar = tk.Canvas(b, height=px(14), bg=C["card"], highlightthickness=0)
-        self.bar.pack(fill="x", pady=(0, px(8)))
-        self.bar.bind("<Configure>", lambda e: self.draw_bar())
-        tbl = tk.Frame(b, bg=C["card"])
-        tbl.pack(fill="x")
-        tbl.columnconfigure(1, weight=1)
-        self.brk = {}
-        rows = [
-            ("labour", "Labour", "#2457E6"),
-            ("travel", "Travel", "#0E8A8A"),
-            ("materials", "Materials & supplies", "#C27A0E"),
-            ("other", "Other costs", "#7A4FBF"),
-            ("direct", "Direct costs", None),
-            ("overhead", "Overhead", "#8393A3"),
-            ("cost", "Total cost", None),
-            ("profit", "Profit", "#12A266"),
-            ("price", "Quote price", None),
-        ]
-        for i, (k, lab, col) in enumerate(rows):
-            strong = col is None
-            if strong:
-                tk.Frame(tbl, bg=C["line"], height=1).grid(
-                    row=i * 2, column=0, columnspan=4, sticky="ew"
-                )
-            else:
-                tk.Frame(tbl, bg=col, width=px(10), height=px(10)).grid(
-                    row=i * 2 + 1, column=0, sticky="w", padx=(0, px(8))
-                )
-            f = (FONT, 10, "bold") if strong else (FONT, 10)
-            tk.Label(tbl, text=lab, bg=C["card"], fg=C["ink"], font=f, anchor="w").grid(
-                row=i * 2 + 1, column=1, sticky="w", pady=px(3)
-            )
-            a = tk.Label(tbl, text="", bg=C["card"], fg=C["ink"], font=f, anchor="e")
-            a.grid(row=i * 2 + 1, column=2, sticky="e", padx=(px(10), 0))
-            p = tk.Label(
-                tbl, text="", bg=C["card"], fg=C["muted"], font=(FONT, 9), width=6, anchor="e"
-            )
-            p.grid(row=i * 2 + 1, column=3, sticky="e")
-            self.brk[k] = (a, p)
-
-        return page
-
-    def _page_doc(self, parent):
-        page = tk.Frame(parent, bg=C["bg"])
-        self.lbl_dochead = self.head(
-            page,
-            "Quote & invoice",
-            "Quote",
-            [
-                lambda p: Btn(p, "Copy as text", self.copy_doc),
-                lambda p: Btn(p, "Save as PDF…", self.save_pdf, "primary"),
-            ],
-        )
-        body = tk.Frame(page, bg=C["bg"])
-        body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, minsize=px(380))
-        body.rowconfigure(0, weight=1)
-
-        left = ScrollFrame(body, C["bg"])
-        left.grid(row=0, column=0, sticky="nsew")
-        self.doc_left = left
-        self._doc_w = 0
-        left.canvas.bind("<Configure>", self._doc_resized, add="+")
-        right = ScrollFrame(body, C["bg"])
-        right.grid(row=0, column=1, sticky="nsew", padx=(px(20), 0))
-
-        paper = tk.Frame(
-            left.inner, bg=C["card"], highlightthickness=1, highlightbackground=C["line"]
-        )
-        paper.pack(anchor="n", pady=(0, px(14)))
-        tk.Frame(paper, bg=C["accent"], height=px(6)).pack(fill="x")
-        self.pw = px(520)
-        self.meas = tkfont.Font(family=FONT, size=10).measure("0")
-        self.preview = tk.Text(
-            paper,
-            wrap="word",
-            font=(FONT, 10),
-            bg=C["card"],
-            fg=C["ink"],
-            relief="flat",
-            bd=0,
-            highlightthickness=0,
-            padx=px(36),
-            pady=px(32),
-            width=60,
-            height=30,
-            cursor="arrow",
-            state="disabled",
-        )
-        self.preview.pack()
-        t = self.preview
-        t.tag_configure("biz", font=(FONT, 14, "bold"))
-        t.tag_configure("title", font=(FONT, 16, "bold"))
-        t.tag_configure("num", font=(FONT, 10), foreground=C["muted"])
-        t.tag_configure("sm", font=(FONT, 9), foreground=C["muted"])
-        t.tag_configure("lab", font=(FONT, 8, "bold"), foreground=C["muted"], spacing1=px(6))
-        t.tag_configure("name", font=(FONT, 11, "bold"))
-        t.tag_configure("mlab", font=(FONT, 9), foreground=C["muted"])
-        t.tag_configure("mval", font=(FONT, 9, "bold"))
-        t.tag_configure("jt", font=(FONT, 12, "bold"), spacing1=px(10))
-        t.tag_configure("scope", font=(FONT, 9), foreground=C["muted"])
-        t.tag_configure(
-            "th",
-            font=(FONT, 8, "bold"),
-            foreground=C["muted"],
-            background=C["soft"],
-            spacing1=px(7),
-            spacing3=px(7),
-            lmargin1=px(8),
-        )
-        t.tag_configure("row", spacing1=px(8), spacing3=px(8), lmargin1=px(8))
-        t.tag_configure("amt", font=(FONT, 10, "bold"))
-        t.tag_configure("tot", font=(FONT, 10), foreground=C["muted"], spacing1=px(3), spacing3=px(3))
-        t.tag_configure("totS", font=(FONT, 11, "bold"), spacing1=px(6), spacing3=px(3))
-        t.tag_configure(
-            "hl", font=(FONT, 11, "bold"), background=C["accent"], foreground="#FFFFFF"
-        )
-        t.tag_configure("note", font=(FONT, 9), foreground=C["muted"], spacing3=px(2))
-        t.tag_configure("pay", font=(FONT, 10))
-
-        R_ = right.inner
-        b = self.card(R_, "Document")
-        self.doc_type = tk.StringVar(value="quote")
-        self.doc_type.trace_add("write", lambda *_: self.on_change())
-        seg = Seg(b, self.doc_type, [("quote", "Quote"), ("invoice", "Invoice")])
-        seg.pack(anchor="w", pady=(0, px(12)))
-        self.row_no = tk.Frame(b, bg=C["card"])
-        self.row_no.pack(fill="x", pady=(0, px(12)))
-        self.f_qno = self.field(self.row_no, "J", "quoteNo", "Quote number", width=12)
-        self.f_ino = self.field(self.row_no, "J", "invoiceNo", "Invoice number", width=12)
-        self.f_date = self.field(
-            self.row_no, "J", "issueDate", "Issue date (YYYY-MM-DD)", width=12
-        )
-        self.f_date.pack(side="right", fill="x", expand=True, padx=(px(14), 0))
-        self.f_paid = self.field(
-            b, "J", "paid", "Amount already received, including tax", prefix="$", width=10
-        )
-        self.itemised = tk.BooleanVar()
-        self.itemised.trace_add("write", lambda *_: self.on_change())
-        self.chk_item = tk.Frame(b, bg=C["card"])
-        self.chk_item.pack(fill="x")
-        ttk.Checkbutton(
-            self.chk_item,
-            text="Show itemised lines",
-            variable=self.itemised,
-            style="Card.TCheckbutton",
-        ).pack(anchor="w")
-        autowrap(
-            tk.Label(
-                self.chk_item,
-                text=(
-                    "Splits the price into labour, materials and other costs. "
-                    "Overhead and profit are spread across the lines, so your costs stay private."
-                ),
-                bg=C["card"],
-                fg=C["muted"],
-                font=(FONT, 9),
-                justify="left",
-                anchor="w",
-            )
-        ).pack(fill="x", padx=(px(22), 0))
-
-        b = self.card(R_, "Customer")
-        self.frow(b, [dict(store="J", key="custEmail", label="Customer email", width=24)])
-        self.frow(
-            b,
-            [
-                dict(
-                    store="J",
-                    key="custAddress",
-                    label="Customer address",
-                    text=True,
-                    height=2,
-                    width=24,
-                )
-            ],
-            last=True,
-        )
-
-        b = self.card(
-            R_,
-            "Send to customer",
-            "Save the PDF, then attach it to your email.",
-            pad_bottom=0,
-        )
-        bb = tk.Frame(b, bg=C["card"])
-        bb.pack(fill="x", pady=(0, px(12)))
-        Btn(bb, "Save as PDF…", self.save_pdf, "primary").pack(side="left")
-        self.frow(b, [dict(store="J", key="emailSubject", label="Email subject", width=24)])
-        self.frow(
-            b, [dict(store="J", key="emailBody", label="Email message", text=True, height=9, width=24)]
-        )
-        bb2 = tk.Frame(b, bg=C["card"])
-        bb2.pack(fill="x")
-        Btn(bb2, "Open in email app", self.open_email).pack(side="left")
-        Btn(bb2, "Copy message", self.copy_msg).pack(side="left", padx=px(6))
-        Btn(bb2, "Reset", self.reset_msg).pack(side="left")
-        self.lbl_doc_status = autowrap(
-            tk.Label(
-                b, text="", bg=C["card"], fg=C["muted"], font=(FONT, 9), justify="left", anchor="w"
-            )
-        )
-        self.lbl_doc_status.pack(fill="x", pady=(px(10), 0))
-        return page
-
-    def _page_library(self, parent):
-        page = tk.Frame(parent, bg=C["bg"])
-        self.head(
-            page,
-            "Job library",
-            "Saved jobs",
-            [
-                lambda p: Btn(p, "Save current to library", self.save_to_library, "primary"),
-                lambda p: Btn(p, "New blank job", self.new_blank),
-            ],
-        )
-
-        # search + actions
-        top = tk.Frame(page, bg=C["bg"])
-        top.pack(fill="x", pady=(0, px(12)))
-        self.lib_search = tk.StringVar()
-        self.lib_search.trace_add("write", lambda *_: self.refresh_library())
-        search_box = tk.Frame(
-            top, bg=C["card"], highlightthickness=1, highlightbackground=C["field"]
-        )
-        search_box.pack(side="left", fill="x", expand=True)
-        tk.Entry(
-            search_box,
-            textvariable=self.lib_search,
-            relief="flat",
-            bd=0,
-            font=(FONT, 11),
-            bg=C["card"],
-            fg=C["ink"],
-            insertbackground=C["ink"],
-            highlightthickness=0,
-        ).pack(fill="x", ipady=px(8), padx=px(12))
-        tk.Label(
-            top,
-            text="  Search by title, customer or notes",
-            bg=C["bg"],
-            fg=C["muted"],
-            font=(FONT, 9),
-        ).pack(side="left", padx=(px(8), 0))
-
-        body = tk.Frame(page, bg=C["bg"])
-        body.pack(fill="both", expand=True)
-
-        # tree
-        cols = ("name", "client", "price", "saved")
-        self.lib_tree = ttk.Treeview(
-            body, columns=cols, show="headings", selectmode="browse", height=18
-        )
-        self.lib_tree.heading("name", text="Job / Name", anchor="w")
-        self.lib_tree.heading("client", text="Customer", anchor="w")
-        self.lib_tree.heading("price", text="Price (excl. tax)", anchor="e")
-        self.lib_tree.heading("saved", text="Saved", anchor="w")
-        self.lib_tree.column("name", width=px(320), anchor="w")
-        self.lib_tree.column("client", width=px(180), anchor="w")
-        self.lib_tree.column("price", width=px(130), anchor="e")
-        self.lib_tree.column("saved", width=px(160), anchor="w")
-        self.lib_tree.pack(side="left", fill="both", expand=True)
-
-        sb = ttk.Scrollbar(body, orient="vertical", command=self.lib_tree.yview)
-        sb.pack(side="right", fill="y")
-        self.lib_tree.configure(yscrollcommand=sb.set)
-
-        # action bar
-        bar = tk.Frame(page, bg=C["bg"])
-        bar.pack(fill="x", pady=(px(12), 0))
-        Btn(bar, "Load into current job", self.lib_load, "primary").pack(side="left")
-        Btn(bar, "Duplicate", self.lib_duplicate).pack(side="left", padx=px(8))
-        Btn(bar, "Delete", self.lib_delete, "danger").pack(side="left")
-        self.lbl_lib_count = tk.Label(
-            bar, text="", bg=C["bg"], fg=C["muted"], font=(FONT, 9)
-        )
-        self.lbl_lib_count.pack(side="right")
-
-        self.lib_tree.bind("<Double-1>", lambda e: self.lib_load())
-        return page
-
-    def _page_settings(self, parent):
-        page = tk.Frame(parent, bg=C["bg"])
-        self.head(
-            page,
-            "Business settings",
-            "Your rates and business details",
-            [lambda p: Btn(p, "Restore example settings", self.reset_settings)],
-        )
-        sf = ScrollFrame(page, C["bg"])
-        sf.pack(fill="both", expand=True)
-        cols = tk.Frame(sf.inner, bg=C["bg"])
-        cols.pack(fill="both", expand=True)
-        cols.columnconfigure(0, weight=1, uniform="c")
-        cols.columnconfigure(1, weight=1, uniform="c")
-        a = tk.Frame(cols, bg=C["bg"])
-        a.grid(row=0, column=0, sticky="new", padx=(0, px(10)))
-        b2 = tk.Frame(cols, bg=C["bg"])
-        b2.grid(row=0, column=1, sticky="new", padx=(px(10), 0))
-
-        b = self.card(a, "Your business", "Printed at the top of every quote and invoice.")
-        self.frow(b, [dict(store="S", key="bizName", label="Business name", width=20)])
-        self.frow(
-            b,
-            [
-                dict(store="S", key="abn", label="ABN or tax number", width=12),
-                dict(store="S", key="phone", label="Phone", width=12),
-            ],
-        )
-        self.frow(b, [dict(store="S", key="bizEmail", label="Business email", width=20)])
-        self.frow(
-            b, [dict(store="S", key="address", label="Business address", text=True, height=2, width=20)]
-        )
-        self.frow(
-            b,
-            [
-                dict(
-                    store="S",
-                    key="currency",
-                    label="Currency code",
-                    hint="AUD, NZD, USD, CAD, GBP, EUR, JPY, SGD, HKD, CHF, INR",
-                    width=8,
-                )
-            ],
-            last=True,
-        )
-
-        b = self.card(a, "Labour cost")
-        self.frow(
-            b,
-            [
-                dict(
-                    store="S",
-                    key="labourRate",
-                    label="Hourly labour cost, per person",
-                    prefix="$",
-                    unit="per hour",
-                    width=8,
-                    hint=(
-                        "What one person costs you per hour, including super, leave, "
-                        "insurance and payroll costs. Count your own time at what you "
-                        "would pay someone to do it."
-                    ),
-                )
-            ],
-            last=True,
-        )
-
-        b = self.card(a, "Overhead allowance")
-        self.ov_mode = tk.StringVar(value="percent")
-        self.ov_mode.trace_add("write", lambda *_: self.on_change())
-        Seg(
-            b,
-            self.ov_mode,
-            [("percent", "% of direct costs"), ("hourly", "Per labour hour")],
-        ).pack(anchor="w", pady=(0, px(12)))
-        self.row_ovp = self.frow(
-            b,
-            [
-                dict(
-                    store="S",
-                    key="overheadPct",
-                    label="Overhead as a share of direct costs",
-                    unit="%",
-                    width=8,
-                    hint=(
-                        "A year of insurance, vehicle costs, software, phone, admin and "
-                        "accounting, divided by a year of direct job costs."
-                    ),
-                )
-            ],
-            last=True,
-        )
-        self.row_ovh = self.frow(
-            b,
-            [
-                dict(
-                    store="S",
-                    key="overheadHourly",
-                    label="Overhead per labour hour",
-                    prefix="$",
-                    unit="per hour",
-                    width=8,
-                    hint=(
-                        "A year of overhead divided by the labour hours you work in a year. "
-                        "Travel hours count."
-                    ),
-                )
-            ],
-            last=True,
-        )
-
-        b = self.card(b2, "Profit & pricing")
-        self.frow(
-            b,
-            [
-                dict(store="S", key="margin", label="Target profit margin", unit="%", width=6),
-                dict(store="S", key="minPrice", label="Minimum job price", prefix="$", width=8),
-            ],
-        )
-        self.frow(
-            b,
-            [
-                dict(
-                    store="S",
-                    key="roundTo",
-                    label="Round quote up to",
-                    unit="$ step",
-                    hint="Use 0 for no rounding, or 1, 5, 10 or 50.",
-                    width=6,
-                )
-            ],
-        )
-        self.lbl_margin = autowrap(
-            tk.Label(
-                b,
-                text="",
-                bg=C["neutral_bg"],
-                fg=C["ink"],
-                font=(FONT, 9),
-                justify="left",
-                anchor="w",
-                padx=px(10),
-                pady=px(8),
-            ),
-            24,
-        )
-        self.lbl_margin.pack(fill="x")
-
-        b = self.card(b2, "Travel")
-        self.frow(
-            b,
-            [
-                dict(
-                    store="S",
-                    key="travelRate",
-                    label="Vehicle cost per kilometre",
-                    prefix="$",
-                    unit="per km",
-                    width=8,
-                    hint="Fuel, servicing, tyres and depreciation. Travel time is charged at your labour cost.",
-                )
-            ],
-            last=True,
-        )
-
-        b = self.card(b2, "Tax")
-        self.tax_on = tk.BooleanVar()
-        self.tax_on.trace_add("write", lambda *_: self.on_change())
-        ttk.Checkbutton(
-            b,
-            text="Add tax to quotes and invoices",
-            variable=self.tax_on,
-            style="Card.TCheckbutton",
-        ).pack(anchor="w", pady=(0, px(12)))
-        self.frow(
-            b,
-            [
-                dict(store="S", key="taxName", label="Tax name", width=8),
-                dict(store="S", key="taxRate", label="Tax rate", unit="%", width=6),
-            ],
-            last=True,
-        )
-
-        b = self.card(b2, "Terms & payment")
-        self.frow(
-            b,
-            [
-                dict(store="S", key="validDays", label="Quote valid for", unit="days", width=6),
-                dict(store="S", key="depositPct", label="Deposit to book", unit="%", width=6),
-                dict(store="S", key="payTerms", label="Invoice terms", unit="days", width=6),
-            ],
-        )
-        self.frow(
-            b,
-            [
-                dict(
-                    store="S",
-                    key="payDetails",
-                    label="Payment details, printed on invoices",
-                    text=True,
-                    height=3,
-                    width=20,
-                )
-            ],
-        )
-        self.frow(
-            b, [dict(store="S", key="docNote", label="Closing note", width=20)], last=True
-        )
-
-        b = self.card(
-            b2,
-            "Your data",
-            "Everything is stored on this computer. Nothing is sent anywhere.",
-            pad_bottom=0,
-        )
-        autowrap(
-            tk.Label(
-                b,
-                text=DATA_FILE,
-                bg=C["neutral_bg"],
-                fg=C["ink"],
-                font=(MONO, 9),
-                justify="left",
-                anchor="w",
-                padx=px(10),
-                pady=px(8),
-            ),
-            24,
-        ).pack(fill="x")
-        bb = tk.Frame(b, bg=C["card"])
-        bb.pack(fill="x", pady=(px(10), 0))
-        Btn(bb, "Open data folder", self.open_data_folder).pack(side="left")
-        Btn(bb, "Export backup…", self.export_backup).pack(side="left", padx=px(6))
-        Btn(bb, "Import backup…", self.import_backup).pack(side="left")
-        return page
-
-    # ----- state <-> widgets -----------------------------------------------
-
-    def fill_all(self):
-        self._busy = True
-        for (store, key), (w, kind) in self.vars.items():
-            val = (self.S if store == "S" else self.J).get(key, "")
-            if kind == "text":
-                w.delete("1.0", "end")
-                w.insert("1.0", str(val))
-            else:
-                w.set("" if val is None else self._show(val))
-        self.doc_type.set(self.J.get("docType", "quote"))
-        self.itemised.set(bool(self.J.get("itemised")))
-        self.ov_mode.set(self.S.get("overheadMode", "percent"))
-        self.tax_on.set(bool(self.S.get("taxOn")))
-        self._busy = False
-        self.fill_trees()
-
-    @staticmethod
-    def _show(v):
-        if isinstance(v, float) and v.is_integer():
-            return str(int(v))
-        return str(v)
-
-    def fill_trees(self):
-        for tree, key, cols in (
-            (self.tree_mat, "materials", ("d", "q", "c")),
-            (self.tree_oth, "other", ("d", "a")),
-        ):
-            tree.delete(*tree.get_children())
-            for row in self.J.get(key, []):
-                vals = [row.get(c, "") for c in cols]
-                vals = [self._show(v) if not isinstance(v, str) else v for v in vals]
-                tree.insert("", "end", values=vals)
-            tree.config(height=max(2, min(6, len(self.J.get(key, [])))))
-
-    def collect(self):
-        for (store, key), (w, kind) in self.vars.items():
-            target = self.S if store == "S" else self.J
-            if kind == "text":
-                target[key] = w.get("1.0", "end").rstrip("\n")
-            else:
-                raw = w.get()
-                target[key] = num(raw) if key in NUMERIC_KEYS else raw
-        self.J["docType"] = self.doc_type.get()
-        self.J["itemised"] = self.itemised.get()
-        self.S["overheadMode"] = self.ov_mode.get()
-        self.S["taxOn"] = self.tax_on.get()
-        # light validation
-        self.J["people"] = max(0, self.J.get("people", 0))
-        self.J["hours"] = max(0.0, self.J.get("hours", 0))
-        self.S["margin"] = clamp(self.S.get("margin", 0), 0, 90)
-
-    def on_text(self, key):
-        if key == "emailBody":
-            self.J["emailEdited"] = True
-        self.on_change()
-
-    def on_change(self):
-        if self._busy:
-            return
-        self.collect()
-        self.refresh(user_edit=True)
-
-    def add_row(self, key, ents):
-        d = ents["d"].get().strip()
-        if key == "materials":
-            row = {"d": d, "q": num(ents["q"].get()) or 1, "c": num(ents["c"].get())}
-            has_value = row["c"] > 0
-        else:
-            row = {"d": d, "a": num(ents["a"].get())}
-            has_value = row["a"] > 0
-        if not d and not has_value:
-            return
-        self.J.setdefault(key, []).append(row)
-        for e in ents.values():
-            e.delete(0, "end")
-        ents["d"].focus_set()
-        self.fill_trees()
-        self.refresh()
-
-    def remove_row(self, key, tree):
-        sel = tree.selection()
-        if not sel:
-            return
-        del self.J[key][tree.index(sel[0])]
-        self.fill_trees()
-        self.refresh()
-
-    # ----- computed display ------------------------------------------------
-
-    def refresh(self, user_edit=False):
-        if not self.vars:
-            return
-        if not user_edit:
-            self.collect()
-        S, J = self.S, self.J
-        r = calc(S, J)
-        self.r = r
-        M = lambda v: money(S, v)
-        sym = SYMBOLS.get(str(S.get("currency", "AUD")).upper(), "$")
-        for lbl in self._cur_labels:
-            try:
-                lbl.config(text=sym)
-            except tk.TclError:
-                pass
-
-        tn = S.get("taxName") or "Tax"
-        self.lbl_side_biz.config(text=S.get("bizName") or "Your business")
-        self.lbl_side_lib.config(
-            text=f"{len(self.library)} job{'s' if len(self.library) != 1 else ''} in library"
-        )
-        self.lbl_jobhead.config(text=J.get("title") or "New job")
-
-        if J.get("sample"):
-            try:
-                self.banner.pack(fill="x", pady=(0, px(14)), before=self.banner.master.winfo_children()[-1])
-            except Exception:
-                self.banner.pack(fill="x", pady=(0, px(14)))
-        else:
-            self.banner.pack_forget()
-
-        self.lbl_priceLab.config(
-            text="RECOMMENDED QUOTE"
-            + (f" (EXCL. {tn.upper()})" if S.get("taxOn") else "")
-        )
-        self.lbl_price.config(text=M(r["price"]))
-        self.lbl_taxline.config(
-            text=(f"{tn} {M(r['tax'])}   |   Total {M(r['total'])}")
-            if S.get("taxOn")
-            else "Total " + M(r["total"])
-        )
-        flag = ""
         if r["min_applied"]:
-            flag = (
-                f"Your minimum job price of {M(pos(S.get('minPrice')))} applies. "
-                f"The costed price was {M(r['raw'])}."
-            )
+            st.warning(f"Minimum price {M(pos(S.get('minPrice')))} applied (costed {M(r['raw'])}).")
         elif r["rounded"]:
-            flag = (
-                f"Rounded up from {M(r['raw'])} to the next "
-                f"{M(pos(S.get('roundTo'))).replace('.00', '')}."
+            st.caption(f"Rounded up from {M(r['raw'])}.")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Cost", M(r["cost"]))
+        m2.metric("Profit", M(r["profit"]))
+        m3.metric("Margin", f"{r['margin'] * 100:.1f}%")
+        m4.metric("Per hour", M(r["pph"]))
+
+        with st.container(border=True):
+            st.markdown("##### Gut-feel check")
+            J["gut"] = st.number_input(
+                "Your usual quote (before tax)",
+                min_value=0.0,
+                value=float(J.get("gut") or 0),
+                step=10.0,
+                label_visibility="collapsed",
+                placeholder="0.00",
             )
-        self.lbl_flag.config(text=flag)
-
-        self.stat["cost"].config(text=M(r["cost"]))
-        self.stat["profit"].config(text=M(r["profit"]))
-        self.stat["margin"].config(
-            text=(f"{r['margin'] * 100:.1f}%") if r["price"] > 0 else "0%"
-        )
-        self.stat["pph"].config(text=M(r["pph"]))
-
-        self.chip_labour.config(text=M(r["labour"]))
-        self.chip_travel.config(text=M(r["travel"]))
-        self.chip_mat.config(text=M(r["materials"]))
-        self.chip_oth.config(text=M(r["other"]))
-
-        self.lbl_labour.config(
-            text=(
-                f"{r['on_site']:.2f} hours on site at {M(pos(S.get('labourRate')))} per hour"
-                if r["on_site"]
-                else "Enter the people and hours on site."
+            tone, head, body = verdict_text(S, J, r)
+            st.markdown(
+                f'<div class="jc-verdict jc-v-{tone}"><strong>{head}</strong>{body}</div>',
+                unsafe_allow_html=True,
             )
-        )
-        self.lbl_travel.config(
-            text=(
-                f"Vehicle {M(r['vehicle'])} plus travel time {M(r['travel_time'])}. "
-                "Travel time is paid to every person."
+
+        with st.container(border=True):
+            st.markdown("##### Price composition")
+            st.markdown(
+                f'<div class="jc-card" style="padding:0.25rem 0;border:none;margin:0">{_breakdown_rows(r, M)}</div>',
+                unsafe_allow_html=True,
             )
-        )
 
-        vals = {
-            "labour": r["labour"],
-            "travel": r["travel"],
-            "materials": r["materials"],
-            "other": r["other"],
-            "direct": r["direct"],
-            "overhead": r["overhead"],
-            "cost": r["cost"],
-            "profit": r["profit"],
-            "price": r["price"],
-        }
-        for k, (a, p) in self.brk.items():
-            a.config(text=M(vals[k]))
-            p.config(text=(f"{vals[k] / r['price'] * 100:.1f}%") if r["price"] > 0 else "")
-
-        self.draw_bar()
-        self.verdict(r)
-
-        mm = clamp(num(S.get("margin")), 0, 90) / 100
-        self.lbl_margin.config(
-            text=(
-                f"At a {mm * 100:.1f}% margin, a job that costs {M(100)} is quoted at "
-                f"{M(100 / (1 - mm) if mm < 1 else 0)}. "
-                f"That is a {mm / (1 - mm) * 100 if mm < 1 else 0:.1f}% markup on cost."
-            )
-        )
-
-        hourly = S.get("overheadMode") == "hourly"
-        if hourly:
-            self.row_ovp.pack_forget()
-            self.row_ovh.pack(fill="x")
-        else:
-            self.row_ovh.pack_forget()
-            self.row_ovp.pack(fill="x")
-
-        m = build_model(S, J, r)
-        self.model = m
-        inv = m["inv"]
-        self.lbl_dochead.config(text=f"{m['title']} {m['number']}")
-        for f in (self.f_qno, self.f_ino, self.f_date):
-            f.pack_forget()
-        (self.f_ino if inv else self.f_qno).pack(side="left", fill="x", expand=True)
-        self.f_date.pack(side="right", fill="x", expand=True, padx=(px(14), 0))
-        if inv:
-            self.f_paid.pack(fill="x", pady=(0, px(12)), before=self.chk_item)
-        else:
-            self.f_paid.pack_forget()
-
-        self.render_preview(m)
-
-        if not J.get("emailEdited"):
-            subj, body = email_template(S, J, m)
-            self._busy = True
-            self.vars[("J", "emailSubject")][0].set(subj)
-            tb = self.vars[("J", "emailBody")][0]
-            tb.delete("1.0", "end")
-            tb.insert("1.0", body)
-            J["emailSubject"], J["emailBody"] = subj, body
-            self._busy = False
-
-        save_data(S, J, self.library)
-        self.lbl_saved.config(
-            text=f"All changes saved  {dt.datetime.now().strftime('%H:%M:%S')}"
-        )
-
-    def _doc_resized(self, e):
-        if abs(e.width - self._doc_w) > 6 and self.model:
-            self._doc_w = e.width
-            self.after(60, lambda: self.render_preview(self.model))
-
-    def render_preview(self, m):
-        t = self.preview
-        avail = self.doc_left.canvas.winfo_width()
-        self.pw = px(520) if avail <= 1 else max(px(340), min(px(560), avail - px(72) - px(8)))
-        R = self.pw
-        t.config(width=int(R / self.meas) + 2)
-        t.tag_configure("tR", tabs=(R, "right"))
-        t.tag_configure("tM", tabs=(int(R * 0.5), "left", R, "right"))
-        t.tag_configure("tT", tabs=(int(R * 0.42), "left", R, "right"))
-        t.tag_configure(
-            "tH", tabs=(int(R * 0.42), "left", R, "right"), spacing1=px(8), spacing3=px(8)
-        )
-        t.config(state="normal")
-        for w in list(t.winfo_children()):
-            w.destroy()
-        t.delete("1.0", "end")
-
-        def put(text, *tags):
-            t.insert("end", text, tags)
-
-        def rule():
-            t.window_create("end", window=tk.Frame(t, bg=C["line"], width=R, height=1))
-            put("\n", "sm")
-
-        put(m["bizName"], "biz", "tR")
-        put("\t" + m["title"].upper() + "\n", "title", "tR")
-        for i, ln in enumerate(m["bizLines"]):
-            put(ln, "sm", "tR")
-            if i == 0:
-                put("\t" + m["number"], "num", "tR")
-            put("\n", "sm", "tR")
-        if not m["bizLines"]:
-            put("\t" + m["number"] + "\n", "num", "tR")
-        put("\n", "sm")
-        rule()
-
-        left = [("lab", m["billLabel"].upper()), ("name", m["billName"])] + [
-            ("sm", x) for x in m["billLines"]
-        ]
-        for i in range(max(len(left), len(m["meta"]))):
-            tag, txt = left[i] if i < len(left) else ("sm", "")
-            put(txt, tag, "tM")
-            if i < len(m["meta"]):
-                put("\t", "tM")
-                put(m["meta"][i][0], "mlab", "tM")
-                put("\t", "tM")
-                put(m["meta"][i][1], "mval", "tM")
-            put("\n", "sm", "tM")
-
-        put(m["jobTitle"] + "\n", "jt")
-        if m["scope"]:
-            put(m["scope"] + "\n", "scope")
-        put("\n", "sm")
-        put("DESCRIPTION", "th", "tR")
-        put(f"\tAMOUNT ({m['currency']})\n", "th", "tR")
-        for desc, amt in m["lines"]:
-            put(desc, "row", "tR")
-            put("\t" + amt + "\n", "row", "amt", "tR")
-            rule()
-        put("\n", "sm")
-        for label, val, strong in m["totals"]:
-            put("\t" + label + "\t" + val + "\n", "totS" if strong else "tot", "tT")
-        if m["highlight"]:
-            put("\n", "sm")
-            put("\t", "tH")
-            put(
-                " " + m["highlight"][0] + "\t" + m["highlight"][1] + "\n",
-                "hl",
-                "tH",
-            )
-        put("\n", "sm")
-        if m["payment"]:
-            put("PAYMENT DETAILS\n", "lab")
-            put(m["payment"] + "\n", "pay")
-            put("\n", "sm")
-        rule()
-        for n in m["notes"]:
-            put(n + "\n", "note")
-
-        t.update_idletasks()
-        try:
-            n = t.count("1.0", "end", "displaylines")[0]
-        except Exception:
-            n = 40
-        t.config(height=n + 1, state="disabled")
-
-    def draw_bar(self):
-        cv = self.bar
-        cv.delete("all")
-        r = self.r
-        if not r or r["price"] <= 0:
-            return
-        w = max(cv.winfo_width(), 10)
-        x = 0.0
-        for k, col in SEG_COLORS:
-            seg = max(r[k], 0) / r["price"] * w
-            if seg > 0.5:
-                cv.create_rectangle(x, 0, x + seg - 2, px(14), fill=col, outline="")
-            x += seg
-
-    def verdict(self, r):
-        gut = pos(self.J.get("gut"))
-        M = lambda v: money(self.S, v)
-        tone = "neutral"
-        if r["cost"] <= 0:
-            head, body = (
-                "Add the job costs first",
-                "Once the job has labour, travel or materials, this compares your usual price with what the job needs.",
-            )
-        elif gut <= 0:
-            head, body = (
-                "Enter your usual price",
-                "Type what you would have quoted by gut feel to see what it earns you on this job.",
-            )
-        elif gut < r["direct"]:
-            tone, head = "bad", "You would lose money on this job"
-            body = (
-                f"{M(gut)} does not cover the {M(r['direct'])} it costs you to do the work. "
-                f"You would be {M(r['direct'] - gut)} out of pocket before any overhead."
-            )
-        elif gut < r["cost"]:
-            tone, head = "bad", "Overhead is not covered"
-            body = (
-                f"{M(gut)} pays for the work but leaves {M(r['cost'] - gut)} of overhead unpaid. "
-                "The job earns no profit."
-            )
-        elif gut < r["price"] - 0.004:
-            gp = gut - r["cost"]
-            tone, head = "warn", "Below your target margin"
-            body = (
-                f"{M(gut)} leaves {M(gp)} profit, a {gp / gut * 100:.1f}% margin against your "
-                f"{r['target'] * 100:.1f}% target. It is {M(r['price'] - gut)} short of the recommended quote."
-            )
-        else:
-            gp = gut - r["cost"]
-            tone, head = "good", "At or above your target"
-            body = f"{M(gut)} leaves {M(gp)} profit, a {gp / gut * 100:.1f}% margin."
-
-        bg = {
-            "neutral": C["neutral_bg"],
-            "bad": C["bad_bg"],
-            "warn": C["warn_bg"],
-            "good": C["good_bg"],
-        }[tone]
-        fg = {
-            "neutral": C["ink"],
-            "bad": C["bad"],
-            "warn": C["warn"],
-            "good": C["good"],
-        }[tone]
-        self.verd.config(bg=bg)
-        self.lbl_vhead.config(text=head, bg=bg, fg=fg)
-        self.lbl_vbody.config(text=body, bg=bg)
-
-    # ----- library actions -------------------------------------------------
-
-    def refresh_library(self):
-        self.lib_tree.delete(*self.lib_tree.get_children())
-        q = (self.lib_search.get() or "").strip().lower()
-        shown = 0
-        # newest first
-        items = sorted(
-            self.library,
-            key=lambda x: x.get("saved_at") or "",
-            reverse=True,
-        )
-        for entry in items:
-            job = entry.get("job") or {}
-            name = entry.get("name") or job.get("title") or "Untitled"
-            client = job.get("client") or ""
-            # quick price estimate for display
-            try:
-                price = calc(self.S, job)["price"]
-            except Exception:
-                price = 0.0
-            saved = entry.get("saved_at") or ""
-            if len(saved) >= 16:
-                saved = saved[:16].replace("T", " ")
-            hay = f"{name} {client} {job.get('scope', '')} {job.get('title', '')}".lower()
-            if q and q not in hay:
-                continue
-            self.lib_tree.insert(
-                "",
-                "end",
-                iid=entry.get("id") or new_id(),
-                values=(name, client, money(self.S, price), saved),
-            )
-            shown += 1
-        self.lbl_lib_count.config(
-            text=f"{shown} of {len(self.library)} job{'s' if len(self.library) != 1 else ''}"
-        )
-
-    def _selected_library_entry(self) -> Optional[Dict]:
-        sel = self.lib_tree.selection()
-        if not sel:
-            return None
-        iid = sel[0]
-        for entry in self.library:
-            if entry.get("id") == iid:
-                return entry
-        return None
-
-    def save_to_library(self):
-        self.collect()
-        name = (self.J.get("title") or self.J.get("client") or "Untitled job").strip()
-        # simple prompt via dialog
-        dlg = tk.Toplevel(self)
-        dlg.title("Save to library")
-        dlg.configure(bg=C["bg"])
-        dlg.transient(self)
-        dlg.grab_set()
-        dlg.resizable(False, False)
-        tk.Label(
-            dlg,
-            text="Name for this saved job",
-            bg=C["bg"],
-            fg=C["ink"],
-            font=(FONT, 11, "bold"),
-        ).pack(padx=px(20), pady=(px(18), px(6)), anchor="w")
-        var = tk.StringVar(value=name)
-        e = tk.Entry(
-            dlg,
-            textvariable=var,
-            font=(FONT, 12),
-            width=40,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=C["field"],
-        )
-        e.pack(padx=px(20), pady=(0, px(14)), ipady=px(6))
-        e.select_range(0, "end")
-        e.focus_set()
-
-        def do_save():
-            n = var.get().strip() or name
-            entry = {
+    st.divider()
+    b1, b2, b3, _ = st.columns([1, 1, 1, 2])
+    with b1:
+        if st.button("New job", use_container_width=True):
+            st.session_state.J = blank_job()
+            st.rerun()
+    with b2:
+        if st.button("Load sample", use_container_width=True):
+            st.session_state.J = sample_job()
+            st.rerun()
+    with b3:
+        if st.button("Save to library", type="primary", use_container_width=True):
+            name = (J.get("title") or J.get("client") or "Untitled").strip()
+            st.session_state.library.append({
                 "id": new_id(),
                 "saved_at": now_iso(),
-                "name": n,
-                "job": deepcopy(self.J),
-            }
-            entry["job"]["library_name"] = n
-            entry["job"]["saved_at"] = entry["saved_at"]
-            self.library.append(entry)
-            save_data(self.S, self.J, self.library)
-            self.lbl_side_lib.config(
-                text=f"{len(self.library)} job{'s' if len(self.library) != 1 else ''} in library"
+                "name": name,
+                "job": deepcopy(J),
+            })
+            st.toast(f"Saved “{name}”")
+
+
+def page_doc():
+    S = st.session_state.S
+    J = st.session_state.J
+    r = calc(S, J)
+    m = build_model(S, J, r)
+
+    st.markdown("<div class='jc-badge'>Documents</div>", unsafe_allow_html=True)
+    st.markdown(f"# {m['title']} {m['number']}")
+    st.caption("Generate a quote or tax invoice and download the PDF.")
+
+    form, preview = st.columns([1, 1.15], gap="large")
+
+    with form:
+        with st.container(border=True):
+            st.markdown("##### Document")
+            doc_type = st.radio(
+                "Type",
+                ["quote", "invoice"],
+                horizontal=True,
+                format_func=lambda x: "Quote" if x == "quote" else "Invoice",
+                index=0 if J.get("docType") != "invoice" else 1,
+                label_visibility="collapsed",
             )
-            dlg.destroy()
-            self.say(f"Saved “{n}” to library.")
-            if self.current == "lib":
-                self.refresh_library()
-
-        bf = tk.Frame(dlg, bg=C["bg"])
-        bf.pack(fill="x", padx=px(20), pady=(0, px(18)))
-        Btn(bf, "Cancel", dlg.destroy).pack(side="right")
-        Btn(bf, "Save", do_save, "primary").pack(side="right", padx=(0, px(8)))
-        dlg.bind("<Return>", lambda e: do_save())
-        dlg.bind("<Escape>", lambda e: dlg.destroy())
-        # centre
-        dlg.update_idletasks()
-        x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
-        y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
-        dlg.geometry(f"+{x}+{y}")
-
-    def lib_load(self):
-        entry = self._selected_library_entry()
-        if not entry:
-            messagebox.showinfo("Job library", "Select a job first.")
-            return
-        if not messagebox.askyesno(
-            "Load job",
-            "Replace the current job with the selected library job?\n\n"
-            "Unsaved changes to the current job will be lost unless you saved it to the library.",
-        ):
-            return
-        self.J = deepcopy(entry.get("job") or blank_job())
-        self.J.setdefault("materials", [])
-        self.J.setdefault("other", [])
-        self.J["emailEdited"] = False
-        self.fill_all()
-        self.refresh()
-        self.show("job")
-        self.say(f"Loaded “{entry.get('name') or 'job'}”.")
-
-    def lib_duplicate(self):
-        entry = self._selected_library_entry()
-        if not entry:
-            messagebox.showinfo("Job library", "Select a job first.")
-            return
-        job = deepcopy(entry.get("job") or {})
-        job["id"] = new_id()
-        name = (entry.get("name") or job.get("title") or "Untitled") + " (copy)"
-        new_entry = {
-            "id": new_id(),
-            "saved_at": now_iso(),
-            "name": name,
-            "job": job,
-        }
-        self.library.append(new_entry)
-        save_data(self.S, self.J, self.library)
-        self.refresh_library()
-        self.say(f"Duplicated as “{name}”.")
-
-    def lib_delete(self):
-        entry = self._selected_library_entry()
-        if not entry:
-            messagebox.showinfo("Job library", "Select a job first.")
-            return
-        name = entry.get("name") or "this job"
-        if not messagebox.askyesno("Delete job", f"Permanently delete “{name}” from the library?"):
-            return
-        self.library = [e for e in self.library if e.get("id") != entry.get("id")]
-        save_data(self.S, self.J, self.library)
-        self.refresh_library()
-        self.lbl_side_lib.config(
-            text=f"{len(self.library)} job{'s' if len(self.library) != 1 else ''} in library"
-        )
-        self.say(f"Deleted “{name}”.")
-
-    # ----- actions ---------------------------------------------------------
-
-    def new_blank(self):
-        if messagebox.askyesno("New blank job", "Clear the current job and start a new one?"):
-            self.J = blank_job()
-            self.fill_all()
-            self.refresh()
-            self.show("job")
-
-    def load_sample(self):
-        if messagebox.askyesno("Load sample job", "Replace the current job with the sample job?"):
-            self.J = sample_job()
-            self.fill_all()
-            self.refresh()
-            self.show("job")
-
-    def reset_settings(self):
-        if messagebox.askyesno(
-            "Restore example settings", "Replace all business settings with the example values?"
-        ):
-            self.S = default_settings()
-            self.fill_all()
-            self.refresh()
-
-    def say(self, text):
-        self.lbl_doc_status.config(text=text)
-        self.lbl_saved.config(text=text)
-
-    def save_pdf(self):
-        try:
-            import reportlab  # noqa: F401
-        except ImportError:
-            messagebox.showerror(
-                "PDF tool missing",
-                "Install it once with:\n\n    pip install reportlab\n\nthen restart the app.",
-            )
-            return
-        self.refresh()
-        m = self.model
-        if not m:
-            return
-        # light validation
-        if not (self.J.get("title") or self.J.get("client")):
-            if not messagebox.askyesno(
-                "Missing details",
-                "This job has no title or customer name.\n\nSave the PDF anyway?",
-            ):
-                return
-        default = (
-            f"{m['title'].replace(' ', '-')}-"
-            f"{''.join(ch if ch.isalnum() or ch in '-_.' else '-' for ch in m['number'])}.pdf"
-        )
-        path = filedialog.asksaveasfilename(
-            title="Save PDF",
-            defaultextension=".pdf",
-            initialfile=default,
-            filetypes=[("PDF", "*.pdf")],
-        )
-        if not path:
-            return
-        try:
-            make_pdf(m, path)
-        except Exception as exc:
-            messagebox.showerror("Could not save PDF", str(exc))
-            return
-        self.show("doc")
-        self.say(f"Saved {path}. Attach it to your email.")
-        self.open_path(os.path.dirname(path), select=path)
-
-    def open_path(self, folder, select=None):
-        try:
-            if sys.platform.startswith("win"):
-                if select:
-                    os.system(f'explorer /select,"{os.path.normpath(select)}"')
-                else:
-                    os.startfile(folder)  # type: ignore
-            elif sys.platform == "darwin":
-                os.system(f'open -R "{select}"' if select else f'open "{folder}"')
+            J["docType"] = doc_type
+            if doc_type == "quote":
+                J["quoteNo"] = st.text_input("Quote number", J.get("quoteNo") or "")
             else:
-                webbrowser.open("file://" + folder)
-        except Exception:
-            pass
-
-    def open_data_folder(self):
-        os.makedirs(APP_DIR, exist_ok=True)
-        save_data(self.S, self.J, self.library)
-        self.open_path(APP_DIR)
-
-    def where_data(self):
-        messagebox.showinfo(
-            "Where is my data stored?",
-            "Your settings, current job and library are saved automatically in this file "
-            f"on your computer:\n\n{DATA_FILE}\n\n"
-            "Nothing is sent over the internet. Use File → Export backup to keep a copy somewhere safe.",
-        )
-
-    def export_backup(self):
-        self.refresh()
-        path = filedialog.asksaveasfilename(
-            title="Export backup",
-            defaultextension=".json",
-            initialfile=f"job-costing-backup-{today_stamp()}.json",
-            filetypes=[("Backup file", "*.json")],
-        )
-        if not path:
-            return
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {"version": 2, "S": self.S, "current": self.J, "library": self.library},
-                    f,
-                    indent=2,
+                J["invoiceNo"] = st.text_input("Invoice number", J.get("invoiceNo") or "")
+                J["paid"] = st.number_input(
+                    "Amount already received (incl. tax)",
+                    min_value=0.0,
+                    value=float(J.get("paid") or 0),
+                    step=10.0,
                 )
-            messagebox.showinfo("Backup saved", f"Backup saved to:\n{path}")
-        except OSError as exc:
-            messagebox.showerror("Could not save backup", str(exc))
+            issue = st.date_input("Issue date", parse_date(J.get("issueDate")))
+            J["issueDate"] = issue.isoformat()
+            J["itemised"] = st.checkbox(
+                "Itemised lines",
+                value=bool(J.get("itemised")),
+                help="Splits price across labour, materials and other. Overhead and profit stay private.",
+            )
 
-    def import_backup(self):
-        path = filedialog.askopenfilename(
-            title="Import backup", filetypes=[("Backup file", "*.json")]
-        )
-        if not path:
-            return
+        with st.container(border=True):
+            st.markdown("##### Customer")
+            J["custEmail"] = st.text_input("Email", J.get("custEmail") or "")
+            J["custAddress"] = st.text_area("Address", J.get("custAddress") or "", height=70)
+
+        with st.container(border=True):
+            st.markdown("##### Export")
+            if not HAS_REPORTLAB:
+                st.error("Install reportlab for PDF export.")
+            else:
+                try:
+                    pdf = make_pdf_bytes(m)
+                    fname = f"{(m['title'] or 'doc').replace(' ', '-')}-{m['number']}.pdf".replace("/", "-")
+                    st.download_button(
+                        "Download PDF",
+                        data=pdf,
+                        file_name=fname,
+                        mime="application/pdf",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                except Exception as exc:
+                    st.error(f"PDF failed: {exc}")
+            st.download_button(
+                "Download text",
+                data=model_text(m),
+                file_name=f"{m['number']}.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+
+        with st.container(border=True):
+            st.markdown("##### Email draft")
+            if not J.get("emailEdited"):
+                subj, body = email_template(S, J, m)
+                J["emailSubject"], J["emailBody"] = subj, body
+            J["emailSubject"] = st.text_input("Subject", J.get("emailSubject") or "")
+            J["emailBody"] = st.text_area("Body", J.get("emailBody") or "", height=200)
+            J["emailEdited"] = True
+            if st.button("Reset template"):
+                J["emailEdited"] = False
+                st.rerun()
+
+    with preview:
+        with st.container(border=True):
+            st.markdown("##### Preview")
+            st.code(model_text(m), language=None)
+
+
+def page_library():
+    st.markdown("<div class='jc-badge'>Library</div>", unsafe_allow_html=True)
+    st.markdown("# Saved jobs")
+    st.caption("Jobs are kept for this browser session only.")
+
+    lib = st.session_state.library
+    q = st.text_input("Search", "", placeholder="Title, customer, notes…")
+    qn = q.strip().lower()
+
+    if not lib:
+        st.info("No saved jobs. Cost a job and use **Save to library**.")
+        return
+
+    items = sorted(lib, key=lambda x: x.get("saved_at") or "", reverse=True)
+    shown = 0
+    for entry in items:
+        job = entry.get("job") or {}
+        name = entry.get("name") or job.get("title") or "Untitled"
+        client = job.get("client") or "—"
+        hay = f"{name} {client} {job.get('scope', '')} {job.get('title', '')}".lower()
+        if qn and qn not in hay:
+            continue
+        shown += 1
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                d = json.load(f)
-            if not isinstance(d, dict):
-                raise ValueError("This is not a Job Costing backup file.")
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            messagebox.showerror("Could not import backup", str(exc))
-            return
-        if not messagebox.askyesno(
-            "Import backup", "Replace your current settings, job and library with the backup?"
-        ):
-            return
+            price = calc(st.session_state.S, job)["price"]
+        except Exception:
+            price = 0.0
+        saved = (entry.get("saved_at") or "")[:16].replace("T", " ")
 
-        self.S = default_settings()
-        self.J = blank_job()
-        self.library = []
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([3.2, 1.1, 1.6])
+            with c1:
+                st.markdown(f"**{name}**")
+                st.caption(f"{client} · {saved}")
+            with c2:
+                st.markdown(
+                    f"<div class='jc-mono' style='font-size:1.05rem;font-weight:600;padding-top:0.35rem'>"
+                    f"{money(st.session_state.S, price)}</div>",
+                    unsafe_allow_html=True,
+                )
+            with c3:
+                a, b, c = st.columns(3)
+                if a.button("Load", key=f"L{entry['id']}", use_container_width=True):
+                    st.session_state.J = deepcopy(job)
+                    st.session_state.J["emailEdited"] = False
+                    st.session_state.page = "Job costing"
+                    st.rerun()
+                if b.button("Copy", key=f"C{entry['id']}", use_container_width=True):
+                    nj = deepcopy(job)
+                    nj["id"] = new_id()
+                    st.session_state.library.append({
+                        "id": new_id(),
+                        "saved_at": now_iso(),
+                        "name": name + " (copy)",
+                        "job": nj,
+                    })
+                    st.rerun()
+                if c.button("Del", key=f"D{entry['id']}", use_container_width=True):
+                    st.session_state.library = [e for e in lib if e.get("id") != entry.get("id")]
+                    st.rerun()
 
-        if "S" in d:
-            self.S.update(d["S"])
-        if "version" in d and d.get("version", 1) >= 2:
-            if "current" in d:
-                self.J.update(d["current"])
-            if "library" in d and isinstance(d["library"], list):
-                self.library = d["library"]
-        else:
-            if "J" in d:
-                self.J.update(d["J"])
-            # also try to recover any library-like data
-            if "library" in d and isinstance(d["library"], list):
-                self.library = d["library"]
+    st.caption(f"{shown} of {len(lib)} jobs")
 
-        self.J.setdefault("materials", [])
-        self.J.setdefault("other", [])
-        self.J.setdefault("id", new_id())
-        self.fill_all()
-        self.refresh()
-        self.say("Backup imported.")
 
-    def clip(self, text, ok):
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        self.say(ok)
+def page_settings():
+    S = st.session_state.S
+    st.markdown("<div class='jc-badge'>Settings</div>", unsafe_allow_html=True)
+    st.markdown("# Business settings")
+    st.caption("Rates and details used on every quote and invoice.")
 
-    def copy_doc(self):
-        if self.model:
-            self.clip(model_text(self.model), "Document text copied.")
+    t1, t2, t3 = st.tabs(["Business", "Rates & pricing", "Terms & tax"])
 
-    def copy_msg(self):
-        self.clip(
-            f"Subject: {self.J.get('emailSubject', '')}\n\n{self.J.get('emailBody', '')}",
-            "Message copied.",
+    with t1:
+        with st.container(border=True):
+            S["bizName"] = st.text_input("Business name", S.get("bizName") or "")
+            c1, c2 = st.columns(2)
+            with c1:
+                S["abn"] = st.text_input("ABN / tax number", S.get("abn") or "")
+            with c2:
+                S["phone"] = st.text_input("Phone", S.get("phone") or "")
+            S["bizEmail"] = st.text_input("Email", S.get("bizEmail") or "")
+            S["address"] = st.text_area("Address", S.get("address") or "", height=80)
+            currencies = ["AUD", "NZD", "USD", "CAD", "GBP", "EUR", "JPY", "SGD", "HKD", "CHF", "INR"]
+            cur = str(S.get("currency", "AUD")).upper()
+            S["currency"] = st.selectbox("Currency", currencies, index=currencies.index(cur) if cur in currencies else 0)
+
+    with t2:
+        with st.container(border=True):
+            S["labourRate"] = st.number_input(
+                "Hourly labour cost (per person)",
+                min_value=0.0,
+                value=float(S.get("labourRate") or 38),
+                step=1.0,
+                help="Include on-costs. Value your own time at market rate.",
+            )
+            mode = st.radio(
+                "Overhead",
+                ["percent", "hourly"],
+                horizontal=True,
+                format_func=lambda x: "% of direct costs" if x == "percent" else "Per labour hour",
+                index=0 if S.get("overheadMode") != "hourly" else 1,
+            )
+            S["overheadMode"] = mode
+            if mode == "percent":
+                S["overheadPct"] = st.number_input("Overhead %", min_value=0.0, value=float(S.get("overheadPct") or 15), step=1.0)
+            else:
+                S["overheadHourly"] = st.number_input("Overhead $/hour", min_value=0.0, value=float(S.get("overheadHourly") or 6), step=0.5)
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                S["margin"] = st.number_input("Target margin %", min_value=0.0, max_value=90.0, value=float(S.get("margin") or 25), step=1.0)
+            with c2:
+                S["minPrice"] = st.number_input("Minimum price", min_value=0.0, value=float(S.get("minPrice") or 150), step=10.0)
+            with c3:
+                S["roundTo"] = st.number_input("Round up ($)", min_value=0.0, value=float(S.get("roundTo") or 5), step=1.0)
+
+            S["travelRate"] = st.number_input("Vehicle $/km", min_value=0.0, value=float(S.get("travelRate") or 0.88), step=0.05)
+
+            mm = clamp(num(S.get("margin")), 0, 90) / 100
+            if 0 < mm < 1:
+                st.caption(
+                    f"At {mm * 100:.0f}% margin, {money(S, 100)} cost → "
+                    f"{money(S, 100 / (1 - mm))} quote ({mm / (1 - mm) * 100:.0f}% markup)."
+                )
+
+    with t3:
+        with st.container(border=True):
+            S["taxOn"] = st.checkbox("Add tax to documents", value=bool(S.get("taxOn")))
+            c1, c2 = st.columns(2)
+            with c1:
+                S["taxName"] = st.text_input("Tax name", S.get("taxName") or "GST")
+            with c2:
+                S["taxRate"] = st.number_input("Tax rate %", min_value=0.0, value=float(S.get("taxRate") or 10), step=0.5)
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                S["validDays"] = st.number_input("Quote valid (days)", min_value=0, value=int(S.get("validDays") or 30), step=1)
+            with c2:
+                S["depositPct"] = st.number_input("Deposit %", min_value=0.0, value=float(S.get("depositPct") or 20), step=5.0)
+            with c3:
+                S["payTerms"] = st.number_input("Invoice terms (days)", min_value=0, value=int(S.get("payTerms") or 14), step=1)
+
+            S["payDetails"] = st.text_area("Payment details", S.get("payDetails") or "", height=90)
+            S["docNote"] = st.text_input("Closing note", S.get("docNote") or "")
+
+    st.divider()
+    if st.button("Restore example settings"):
+        st.session_state.S = default_settings()
+        st.rerun()
+
+
+def main():
+    st.set_page_config(
+        page_title="Job Costing",
+        page_icon="▢",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    inject_styles()
+    init_state()
+
+    with st.sidebar:
+        st.markdown(
+            """
+            <div style="padding:0.4rem 0 1rem">
+              <div style="font-weight:700;font-size:1.05rem;letter-spacing:-0.02em;color:#fff">Job Costing</div>
+              <div style="font-size:0.78rem;color:#94a3b8;margin-top:0.15rem">Quotation calculator</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-
-    def reset_msg(self):
-        self.J["emailEdited"] = False
-        self.refresh()
-        self.say("Message reset.")
-
-    def open_email(self):
-        url = (
-            f"mailto:{quote(self.J.get('custEmail', ''))}"
-            f"?subject={quote(self.J.get('emailSubject', ''))}"
-            f"&body={quote(self.J.get('emailBody', ''))}"
+        pages = ["Job costing", "Quote & invoice", "Job library", "Business settings"]
+        labels = {
+            "Job costing": "Costing",
+            "Quote & invoice": "Documents",
+            "Job library": "Library",
+            "Business settings": "Settings",
+        }
+        current = st.session_state.page if st.session_state.page in pages else pages[0]
+        choice = st.radio(
+            "Nav",
+            pages,
+            index=pages.index(current),
+            format_func=lambda p: labels.get(p, p),
+            label_visibility="collapsed",
         )
-        webbrowser.open(url)
-        self.say("Opened your email app. Attach the saved PDF before sending.")
+        st.session_state.page = choice
+        st.markdown("---")
+        st.caption(st.session_state.S.get("bizName") or "Your business")
+        n = len(st.session_state.library)
+        st.caption(f"{n} job{'s' if n != 1 else ''} in library")
+        st.caption(f"v{APP_VERSION}")
 
-
-# ---------------------------------------------------------------------------
-# Quick self-test (run with: python job_costing_app.py --test)
-# ---------------------------------------------------------------------------
-
-def _run_tests() -> None:
-    print("Running calc tests…")
-    s = default_settings()
-    j = sample_job()
-    r = calc(s, j)
-    assert r["on_site"] == 6.0, r["on_site"]
-    assert r["labour"] == 6 * 38, r["labour"]
-    assert r["cost"] > 0
-    assert r["price"] >= r["cost"]
-    assert 0 <= r["margin"] <= 1
-    assert r["total"] >= r["price"]
-
-    # zero cost
-    j2 = blank_job()
-    r2 = calc(s, j2)
-    assert r2["price"] == 0
-    assert r2["profit"] == 0
-
-    # min price
-    s2 = default_settings()
-    s2["minPrice"] = 500
-    j3 = blank_job()
-    j3["people"] = 1
-    j3["hours"] = 1
-    r3 = calc(s2, j3)
-    assert r3["price"] >= 500 or r3["cost"] == 0
-
-    # margin clamp
-    s3 = default_settings()
-    s3["margin"] = 95
-    r4 = calc(s3, sample_job())
-    assert r4["target"] <= 0.90
-
-    print("All tests passed.")
+    page = st.session_state.page
+    if page == "Job costing":
+        page_job()
+    elif page == "Quote & invoice":
+        page_doc()
+    elif page == "Job library":
+        page_library()
+    else:
+        page_settings()
 
 
 if __name__ == "__main__":
-    if "--test" in sys.argv:
-        _run_tests()
-    else:
-        App().mainloop()
+    main()
