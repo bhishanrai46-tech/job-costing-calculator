@@ -36,7 +36,7 @@ except ImportError:
 # Constants & pure helpers (shared with desktop version)
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3-streamlit-sidebar-fix"
+APP_VERSION = "2.3-mobile-sidebar"
 
 SYMBOLS = {
     "AUD": "$", "NZD": "$", "USD": "$", "CAD": "$",
@@ -676,23 +676,14 @@ DESKTOP_CSS = """
   --neutral-bg: #E2E8F0;
 }
 
-html, body {
+html, body, [class*="css"] {
   font-family: Inter, "Segoe UI", system-ui, -apple-system, sans-serif !important;
+  color: var(--ink) !important;
   -webkit-text-size-adjust: 100%;
 }
 
 .stApp {
   background: var(--bg) !important;
-  color: var(--ink) !important;
-}
-
-/* Ensure main content is always visible */
-section[data-testid="stMain"],
-.main,
-div[data-testid="stAppViewContainer"] {
-  visibility: visible !important;
-  opacity: 1 !important;
-  display: block !important;
 }
 
 .block-container {
@@ -701,7 +692,6 @@ div[data-testid="stAppViewContainer"] {
   padding-left: 1.25rem !important;
   padding-right: 1.25rem !important;
   max-width: 1280px !important;
-  visibility: visible !important;
 }
 
 /* —— Sidebar —— */
@@ -984,7 +974,7 @@ div[data-testid="stMetricLabel"] {
   border-radius: 6px !important;
 }
 
-/* Hide Streamlit chrome */
+/* Hide Streamlit chrome — keep header on mobile so the sidebar toggle stays usable */
 #MainMenu, footer {
   visibility: hidden;
   height: 0;
@@ -992,9 +982,29 @@ div[data-testid="stMetricLabel"] {
 header[data-testid="stHeader"] {
   background: transparent !important;
 }
-/* Keep header slot minimal but don't force height:0 (breaks some Streamlit versions) */
-header[data-testid="stHeader"] * {
-  visibility: hidden;
+/* Desktop: collapse header chrome; mobile needs the hamburger for the sidebar */
+@media (min-width: 769px) {
+  header[data-testid="stHeader"] {
+    height: 0 !important;
+    min-height: 0 !important;
+    visibility: hidden;
+  }
+}
+@media (max-width: 768px) {
+  header[data-testid="stHeader"] {
+    visibility: visible !important;
+    height: auto !important;
+    min-height: 2.75rem !important;
+    background: var(--side) !important;
+  }
+  /* Keep toolbar minimal but show the sidebar button */
+  header[data-testid="stHeader"] [data-testid="stToolbar"] {
+    visibility: visible !important;
+  }
+  /* Soften default header buttons so they match the app */
+  header[data-testid="stHeader"] button {
+    color: #E2E8F0 !important;
+  }
 }
 
 hr {
@@ -1015,26 +1025,10 @@ hr {
   float: right;
 }
 
-/* Sidebar nav items + active accent bar */
-section[data-testid="stSidebar"] .stRadio label {
-  position: relative !important;
-  border-left: 3px solid transparent !important;
-  padding-left: 0.65rem !important;
-  margin: 0.1rem 0.35rem !important;
-  border-radius: 6px !important;
-}
+/* Sidebar active nav item */
 section[data-testid="stSidebar"] .stRadio label:has(input:checked) {
   background: var(--side-active) !important;
   color: #FFFFFF !important;
-  border-left: 3px solid #3B82F6 !important;
-}
-section[data-testid="stSidebar"] .stRadio label:hover {
-  background: var(--side-hover) !important;
-  border-left-color: #64748B !important;
-}
-/* Hide default radio circle for cleaner nav */
-section[data-testid="stSidebar"] .stRadio label > div:first-child {
-  display: none !important;
 }
 
 /* —— Mobile / narrow screens —— */
@@ -1086,10 +1080,18 @@ section[data-testid="stSidebar"] .stRadio label > div:first-child {
     padding: 0.55rem 0.9rem !important;
   }
 
-  /* Sidebar nav more tappable */
+  /* Sidebar nav more tappable on mobile */
+  section[data-testid="stSidebar"] {
+    min-width: 260px !important;
+  }
   section[data-testid="stSidebar"] .stRadio label {
-    padding: 0.75rem 0.6rem !important;
+    padding: 0.75rem 0.65rem !important;
     font-size: 1rem !important;
+  }
+  /* Active nav on mobile */
+  section[data-testid="stSidebar"] .stRadio label:has(input:checked) {
+    background: var(--side-active) !important;
+    border-left: 3px solid #3B82F6 !important;
   }
 
   /* Reduce column crowding */
