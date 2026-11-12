@@ -36,7 +36,7 @@ except ImportError:
 # Constants & pure helpers (shared with desktop version)
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.2-streamlit-layout"
+APP_VERSION = "2.3-streamlit-sidebar-fix"
 
 SYMBOLS = {
     "AUD": "$", "NZD": "$", "USD": "$", "CAD": "$",
@@ -676,14 +676,23 @@ DESKTOP_CSS = """
   --neutral-bg: #E2E8F0;
 }
 
-html, body, [class*="css"] {
+html, body {
   font-family: Inter, "Segoe UI", system-ui, -apple-system, sans-serif !important;
-  color: var(--ink) !important;
   -webkit-text-size-adjust: 100%;
 }
 
 .stApp {
   background: var(--bg) !important;
+  color: var(--ink) !important;
+}
+
+/* Ensure main content is always visible */
+section[data-testid="stMain"],
+.main,
+div[data-testid="stAppViewContainer"] {
+  visibility: visible !important;
+  opacity: 1 !important;
+  display: block !important;
 }
 
 .block-container {
@@ -692,6 +701,7 @@ html, body, [class*="css"] {
   padding-left: 1.25rem !important;
   padding-right: 1.25rem !important;
   max-width: 1280px !important;
+  visibility: visible !important;
 }
 
 /* —— Sidebar —— */
@@ -975,12 +985,16 @@ div[data-testid="stMetricLabel"] {
 }
 
 /* Hide Streamlit chrome */
-#MainMenu, footer, header[data-testid="stHeader"] {
+#MainMenu, footer {
   visibility: hidden;
   height: 0;
 }
 header[data-testid="stHeader"] {
   background: transparent !important;
+}
+/* Keep header slot minimal but don't force height:0 (breaks some Streamlit versions) */
+header[data-testid="stHeader"] * {
+  visibility: hidden;
 }
 
 hr {
@@ -1001,10 +1015,26 @@ hr {
   float: right;
 }
 
-/* Sidebar active nav item */
+/* Sidebar nav items + active accent bar */
+section[data-testid="stSidebar"] .stRadio label {
+  position: relative !important;
+  border-left: 3px solid transparent !important;
+  padding-left: 0.65rem !important;
+  margin: 0.1rem 0.35rem !important;
+  border-radius: 6px !important;
+}
 section[data-testid="stSidebar"] .stRadio label:has(input:checked) {
   background: var(--side-active) !important;
   color: #FFFFFF !important;
+  border-left: 3px solid #3B82F6 !important;
+}
+section[data-testid="stSidebar"] .stRadio label:hover {
+  background: var(--side-hover) !important;
+  border-left-color: #64748B !important;
+}
+/* Hide default radio circle for cleaner nav */
+section[data-testid="stSidebar"] .stRadio label > div:first-child {
+  display: none !important;
 }
 
 /* —— Mobile / narrow screens —— */
