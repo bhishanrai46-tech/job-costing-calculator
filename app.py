@@ -36,7 +36,7 @@ except ImportError:
 # Constants & pure helpers (shared with desktop version)
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3-mobile-sidebar"
+APP_VERSION = "2.4-mobile-friendly"
 
 SYMBOLS = {
     "AUD": "$", "NZD": "$", "USD": "$", "CAD": "$",
@@ -996,14 +996,26 @@ header[data-testid="stHeader"] {
     height: auto !important;
     min-height: 2.75rem !important;
     background: var(--side) !important;
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 999 !important;
   }
-  /* Keep toolbar minimal but show the sidebar button */
   header[data-testid="stHeader"] [data-testid="stToolbar"] {
     visibility: visible !important;
+    display: flex !important;
   }
-  /* Soften default header buttons so they match the app */
-  header[data-testid="stHeader"] button {
+  /* Sidebar open/close control must stay visible */
+  header[data-testid="stHeader"] button,
+  [data-testid="collapsedControl"],
+  [data-testid="stSidebarCollapsedControl"],
+  [kind="header"] {
+    visibility: visible !important;
     color: #E2E8F0 !important;
+    display: inline-flex !important;
+  }
+  /* App view: full width when sidebar collapsed */
+  section[data-testid="stAppViewContainer"] {
+    width: 100% !important;
   }
 }
 
@@ -1033,89 +1045,152 @@ section[data-testid="stSidebar"] .stRadio label:has(input:checked) {
 
 /* —— Mobile / narrow screens —— */
 @media (max-width: 768px) {
+  /* Force ALL Streamlit column rows to stack vertically */
+  div[data-testid="stHorizontalBlock"] {
+    flex-wrap: wrap !important;
+    gap: 0.65rem !important;
+  }
+  div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+    width: 100% !important;
+    flex: 1 1 100% !important;
+    min-width: 100% !important;
+  }
+
   .block-container {
-    padding-left: 0.75rem !important;
-    padding-right: 0.75rem !important;
-    padding-top: 0.75rem !important;
-    padding-bottom: 1.5rem !important;
+    padding-left: 0.65rem !important;
+    padding-right: 0.65rem !important;
+    padding-top: 0.5rem !important;
+    padding-bottom: 1.25rem !important;
+    max-width: 100% !important;
   }
 
   h1 {
-    font-size: 1.3rem !important;
+    font-size: 1.2rem !important;
+    line-height: 1.3 !important;
   }
 
+  /* Hero — compact but readable */
   .hero {
-    padding: 1rem 0.95rem 0.9rem;
+    padding: 0.9rem 0.85rem 0.85rem;
+    margin-bottom: 0.7rem;
+    border-radius: 8px;
   }
   .hero-price {
-    font-size: 1.7rem;
+    font-size: 1.55rem;
+  }
+  .hero-sub {
+    font-size: 0.82rem;
   }
   .hero-stats {
     grid-template-columns: 1fr 1fr;
-    gap: 0.6rem 0.75rem;
+    gap: 0.55rem 0.6rem;
   }
   .hero-stat-value {
-    font-size: 0.95rem;
+    font-size: 0.92rem;
+  }
+  .hero-stat-label {
+    font-size: 0.6rem;
   }
 
   .banner {
-    font-size: 0.85rem;
-    padding: 0.6rem 0.8rem;
+    font-size: 0.82rem;
+    padding: 0.55rem 0.7rem;
   }
 
   .brk {
-    font-size: 0.85rem;
+    font-size: 0.84rem;
     flex-wrap: wrap;
+    gap: 0.25rem;
   }
   .brk .pc {
-    min-width: 2.6rem;
+    min-width: 2.4rem;
   }
 
-  /* Touch-friendly buttons */
+  .chip {
+    float: none;
+    display: inline-block;
+    margin-left: 0.35rem;
+    margin-top: 0;
+    vertical-align: middle;
+  }
+
+  /* Full-width touch targets */
   .stButton > button,
   .stDownloadButton > button,
   .stLinkButton > a {
-    min-height: 2.75rem !important;
-    font-size: 0.92rem !important;
-    padding: 0.55rem 0.9rem !important;
+    min-height: 2.85rem !important;
+    font-size: 0.95rem !important;
+    padding: 0.55rem 0.85rem !important;
+    width: 100% !important;
   }
 
-  /* Sidebar nav more tappable on mobile */
+  /* Inputs readable and not overflowing */
+  .stTextInput input,
+  .stNumberInput input,
+  .stTextArea textarea {
+    font-size: 16px !important; /* prevents iOS zoom on focus */
+  }
+
+  /* Sidebar drawer */
   section[data-testid="stSidebar"] {
-    min-width: 260px !important;
+    min-width: 0 !important;
+    width: min(86vw, 300px) !important;
   }
   section[data-testid="stSidebar"] .stRadio label {
-    padding: 0.75rem 0.65rem !important;
+    padding: 0.8rem 0.7rem !important;
     font-size: 1rem !important;
+    margin: 0.12rem 0.25rem !important;
   }
-  /* Active nav on mobile */
   section[data-testid="stSidebar"] .stRadio label:has(input:checked) {
     background: var(--side-active) !important;
     border-left: 3px solid #3B82F6 !important;
   }
 
-  /* Reduce column crowding */
-  [data-testid="stHorizontalBlock"] {
-    gap: 0.6rem !important;
+  /* Cards less padding on small screens */
+  div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 8px !important;
   }
 
-  .chip {
-    float: none;
-    display: block;
-    margin-top: 0.25rem;
-    width: fit-content;
+  /* Data editor horizontal scroll instead of page overflow */
+  [data-testid="stDataFrame"],
+  [data-testid="stDataEditor"] {
+    overflow-x: auto !important;
+    max-width: 100% !important;
+  }
+
+  /* Tabs (settings) more tappable */
+  button[data-baseweb="tab"] {
+    font-size: 0.88rem !important;
+    padding: 0.55rem 0.7rem !important;
+  }
+
+  /* Metric / caption */
+  .stCaption, [data-testid="stCaptionContainer"] {
+    font-size: 0.8rem !important;
+  }
+
+  /* Prevent horizontal page scroll */
+  .stApp, .main, section[data-testid="stMain"] {
+    overflow-x: hidden !important;
+  }
+  .block-container {
+    overflow-x: hidden !important;
   }
 }
 
 @media (max-width: 480px) {
   .hero-price {
-    font-size: 1.5rem;
+    font-size: 1.4rem;
   }
   .hero-stats {
     grid-template-columns: 1fr 1fr;
   }
   h1 {
-    font-size: 1.2rem !important;
+    font-size: 1.1rem !important;
+  }
+  .block-container {
+    padding-left: 0.5rem !important;
+    padding-right: 0.5rem !important;
   }
 }
 </style>
