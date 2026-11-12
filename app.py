@@ -36,7 +36,7 @@ except ImportError:
 # Constants & pure helpers (shared with desktop version)
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.1-streamlit-mobile"
+APP_VERSION = "2.2-streamlit-layout"
 
 SYMBOLS = {
     "AUD": "$", "NZD": "$", "USD": "$", "CAD": "$",
@@ -1001,6 +1001,12 @@ hr {
   float: right;
 }
 
+/* Sidebar active nav item */
+section[data-testid="stSidebar"] .stRadio label:has(input:checked) {
+  background: var(--side-active) !important;
+  color: #FFFFFF !important;
+}
+
 /* —— Mobile / narrow screens —— */
 @media (max-width: 768px) {
   .block-container {
@@ -1186,7 +1192,42 @@ def page_job():
             unsafe_allow_html=True,
         )
 
-    left, right = st.columns([1.35, 1], gap="medium")
+    # Full-width recommended price — visible first on mobile and desktop
+    flag = ""
+    if r["min_applied"]:
+        flag = (
+            f'<div class="hero-flag">Your minimum job price of {M(pos(S.get("minPrice")))} applies. '
+            f'The costed price was {M(r["raw"])}.</div>'
+        )
+    elif r["rounded"]:
+        flag = f'<div class="hero-flag">Rounded up from {M(r["raw"])}.</div>'
+
+    tax_line = (
+        f'{tn} {M(r["tax"])} &nbsp;|&nbsp; Total {M(r["total"])}'
+        if S.get("taxOn")
+        else f'Total {M(r["total"])}'
+    )
+    lab = "RECOMMENDED QUOTE" + (f" (EXCL. {tn.upper()})" if S.get("taxOn") else "")
+
+    st.markdown(
+        f"""
+        <div class="hero">
+          <div class="hero-label">{lab}</div>
+          <div class="hero-price">{M(r["price"])}</div>
+          <div class="hero-sub">{tax_line}</div>
+          {flag}
+          <div class="hero-stats">
+            <div><div class="hero-stat-label">Total cost</div><div class="hero-stat-value">{M(r["cost"])}</div></div>
+            <div><div class="hero-stat-label">Profit</div><div class="hero-stat-value">{M(r["profit"])}</div></div>
+            <div><div class="hero-stat-label">Margin</div><div class="hero-stat-value">{r["margin"]*100:.1f}%</div></div>
+            <div><div class="hero-stat-label">Profit per hour</div><div class="hero-stat-value">{M(r["pph"])}</div></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns([1.4, 1], gap="large")
 
     with left:
         with st.container(border=True):
@@ -1206,11 +1247,23 @@ def page_job():
             )
             c1, c2 = st.columns(2)
             with c1:
-                J["people"] = st.number_input("People on the job", min_value=0.0, value=float(J.get("people") or 1), step=1.0)
+                J["people"] = st.number_input(
+                    "People on the job",
+                    min_value=0.0,
+                    value=float(J.get("people") or 1),
+                    step=1.0,
+                )
             with c2:
-                J["hours"] = st.number_input("Hours on site, each", min_value=0.0, value=float(J.get("hours") or 0), step=0.25)
+                J["hours"] = st.number_input(
+                    "Hours on site, each",
+                    min_value=0.0,
+                    value=float(J.get("hours") or 0),
+                    step=0.25,
+                )
             if r["on_site"]:
-                st.caption(f"{r['on_site']:.2f} hours on site at {M(pos(S.get('labourRate')))} per hour")
+                st.caption(
+                    f"{r['on_site']:.2f} hours on site at {M(pos(S.get('labourRate')))} per hour"
+                )
             else:
                 st.caption("Enter the people and hours on site.")
 
@@ -1221,11 +1274,24 @@ def page_job():
             )
             c1, c2 = st.columns(2)
             with c1:
-                J["km"] = st.number_input("Distance, return trip", min_value=0.0, value=float(J.get("km") or 0), step=1.0, help="km")
+                J["km"] = st.number_input(
+                    "Distance, return trip",
+                    min_value=0.0,
+                    value=float(J.get("km") or 0),
+                    step=1.0,
+                    help="km",
+                )
             with c2:
-                J["travelHours"] = st.number_input("Travel time, return trip", min_value=0.0, value=float(J.get("travelHours") or 0), step=0.25, help="hrs")
+                J["travelHours"] = st.number_input(
+                    "Travel time, return trip",
+                    min_value=0.0,
+                    value=float(J.get("travelHours") or 0),
+                    step=0.25,
+                    help="hrs",
+                )
             st.caption(
-                f"Vehicle {M(r['vehicle'])} plus travel time {M(r['travel_time'])}. Travel time is paid to every person."
+                f"Vehicle {M(r['vehicle'])} plus travel time {M(r['travel_time'])}. "
+                "Travel time is paid to every person."
             )
 
         with st.container(border=True):
@@ -1235,7 +1301,14 @@ def page_job():
             )
             st.caption("Everything you buy for this job.")
             mats = J.get("materials") or []
-            data = [{"Item": m.get("d", ""), "Qty": float(m.get("q") or 1), "Unit cost": float(m.get("c") or 0)} for m in mats]
+            data = [
+                {
+                    "Item": m.get("d", ""),
+                    "Qty": float(m.get("q") or 1),
+                    "Unit cost": float(m.get("c") or 0),
+                }
+                for m in mats
+            ]
             edited = st.data_editor(
                 data if data else [{"Item": "", "Qty": 1.0, "Unit cost": 0.0}],
                 num_rows="dynamic",
@@ -1244,11 +1317,17 @@ def page_job():
                 column_config={
                     "Item": st.column_config.TextColumn("Item"),
                     "Qty": st.column_config.NumberColumn("Qty", min_value=0, format="%.2f"),
-                    "Unit cost": st.column_config.NumberColumn("Unit cost", min_value=0, format="%.2f"),
+                    "Unit cost": st.column_config.NumberColumn(
+                        "Unit cost", min_value=0, format="%.2f"
+                    ),
                 },
             )
             J["materials"] = [
-                {"d": (row.get("Item") or "").strip(), "q": pos(row.get("Qty")), "c": pos(row.get("Unit cost"))}
+                {
+                    "d": (row.get("Item") or "").strip(),
+                    "q": pos(row.get("Qty")),
+                    "c": pos(row.get("Unit cost")),
+                }
                 for row in edited
                 if (row.get("Item") or "").strip() or pos(row.get("Unit cost")) > 0
             ]
@@ -1260,7 +1339,10 @@ def page_job():
             )
             st.caption("Equipment hire, subcontractors, tip fees and permits.")
             oths = J.get("other") or []
-            odata = [{"Description": o.get("d", ""), "Amount": float(o.get("a") or 0)} for o in oths]
+            odata = [
+                {"Description": o.get("d", ""), "Amount": float(o.get("a") or 0)}
+                for o in oths
+            ]
             oed = st.data_editor(
                 odata if odata else [{"Description": "", "Amount": 0.0}],
                 num_rows="dynamic",
@@ -1268,48 +1350,21 @@ def page_job():
                 key="oth_ed",
                 column_config={
                     "Description": st.column_config.TextColumn("Description"),
-                    "Amount": st.column_config.NumberColumn("Amount", min_value=0, format="%.2f"),
+                    "Amount": st.column_config.NumberColumn(
+                        "Amount", min_value=0, format="%.2f"
+                    ),
                 },
             )
             J["other"] = [
-                {"d": (row.get("Description") or "").strip(), "a": pos(row.get("Amount"))}
+                {
+                    "d": (row.get("Description") or "").strip(),
+                    "a": pos(row.get("Amount")),
+                }
                 for row in oed
                 if (row.get("Description") or "").strip() or pos(row.get("Amount")) > 0
             ]
 
     with right:
-        # Hero — same as desktop dark panel
-        flag = ""
-        if r["min_applied"]:
-            flag = f'<div class="hero-flag">Your minimum job price of {M(pos(S.get("minPrice")))} applies. The costed price was {M(r["raw"])}.</div>'
-        elif r["rounded"]:
-            flag = f'<div class="hero-flag">Rounded up from {M(r["raw"])}.</div>'
-
-        tax_line = (
-            f'{tn} {M(r["tax"])} &nbsp;|&nbsp; Total {M(r["total"])}'
-            if S.get("taxOn")
-            else f'Total {M(r["total"])}'
-        )
-        lab = "RECOMMENDED QUOTE" + (f" (EXCL. {tn.upper()})" if S.get("taxOn") else "")
-
-        st.markdown(
-            f"""
-            <div class="hero">
-              <div class="hero-label">{lab}</div>
-              <div class="hero-price">{M(r["price"])}</div>
-              <div class="hero-sub">{tax_line}</div>
-              {flag}
-              <div class="hero-stats">
-                <div><div class="hero-stat-label">Total cost</div><div class="hero-stat-value">{M(r["cost"])}</div></div>
-                <div><div class="hero-stat-label">Profit</div><div class="hero-stat-value">{M(r["profit"])}</div></div>
-                <div><div class="hero-stat-label">Margin</div><div class="hero-stat-value">{r["margin"]*100:.1f}%</div></div>
-                <div><div class="hero-stat-label">Profit per hour</div><div class="hero-stat-value">{M(r["pph"])}</div></div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
         with st.container(border=True):
             st.markdown("**Compare with your usual quote**")
             J["gut"] = st.number_input(
@@ -1330,7 +1385,7 @@ def page_job():
             st.markdown(_breakdown(r, M), unsafe_allow_html=True)
 
     st.divider()
-    a, b, c, _ = st.columns([1, 1, 1.2, 2])
+    a, b, c = st.columns(3)
     with a:
         if st.button("New blank job", use_container_width=True):
             st.session_state.J = blank_job()
@@ -1342,13 +1397,16 @@ def page_job():
     with c:
         if st.button("Save to library", type="primary", use_container_width=True):
             name = (J.get("title") or J.get("client") or "Untitled job").strip()
-            st.session_state.library.append({
-                "id": new_id(),
-                "saved_at": now_iso(),
-                "name": name,
-                "job": deepcopy(J),
-            })
-            st.toast(f"Saved “{name}”")
+            st.session_state.library.append(
+                {
+                    "id": new_id(),
+                    "saved_at": now_iso(),
+                    "name": name,
+                    "job": deepcopy(J),
+                }
+            )
+            st.toast(f'Saved “{name}”')
+
 
 
 def render_doc_preview(m: Dict) -> str:
@@ -1906,15 +1964,15 @@ def main():
     with st.sidebar:
         st.markdown(
             """
-            <div style="display:flex;align-items:center;gap:10px;padding:0.35rem 0 1.1rem">
-              <div style="width:34px;height:34px;background:#2457E6;border-radius:4px;display:flex;flex-direction:column;justify-content:center;padding-left:8px;gap:4px">
+            <div style="display:flex;align-items:center;gap:10px;padding:0.35rem 0 1.15rem">
+              <div style="width:36px;height:36px;background:#1D4ED8;border-radius:8px;display:flex;flex-direction:column;justify-content:center;padding-left:9px;gap:4px;box-shadow:0 2px 8px rgba(29,78,216,0.35)">
                 <div style="height:2.5px;width:18px;background:#fff;border-radius:1px"></div>
                 <div style="height:2.5px;width:12px;background:#fff;border-radius:1px"></div>
                 <div style="height:2.5px;width:7px;background:#fff;border-radius:1px"></div>
               </div>
               <div>
-                <div style="font-weight:700;font-size:0.95rem;color:#fff;line-height:1.2">Job Costing</div>
-                <div style="font-size:0.72rem;color:#7D8EA6">Quotation Calculator</div>
+                <div style="font-weight:700;font-size:0.98rem;color:#F8FAFC;line-height:1.2">Job Costing</div>
+                <div style="font-size:0.72rem;color:#94A3B8">Quotation Calculator</div>
               </div>
             </div>
             """,
