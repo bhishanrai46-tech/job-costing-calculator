@@ -1454,12 +1454,31 @@ def snum(label, name, default, **kw):
 # ---------------------------------------------------------------------------
 
 def init_state() -> None:
-    if "S" in ss:
+    """Create session state once. A version marker (not just 'S') guards it, so state
+    left by an older version of the app is migrated instead of crashing the new code."""
+    if ss.get("_ready") == DATA_VERSION:
         return
+    # Drop widget keys from older versions; they may hold values of the wrong type.
+    for k in [k for k in ss.keys() if isinstance(k, str) and (k.startswith("j") and "_" in k[:6] or k.startswith("s_"))]:
+        del ss[k]
+    try:
+        old_s, old_j, old_lib = ss.get("S"), ss.get("J"), ss.get("library")
+    except Exception:
+        old_s = old_j = old_lib = None
     loaded = load_file()
     if loaded:
         ss.S, ss.library, job = loaded
         ss.J = job or blank_job(ss.S["timezone"])
+    elif isinstance(old_s, dict):
+        ss.S = normalise_settings(old_s)
+        ss.J = normalise_job(old_j, ss.S["timezone"]) if isinstance(old_j, dict) else blank_job(ss.S["timezone"])
+        lib = []
+        for e in old_lib if isinstance(old_lib, list) else []:
+            if isinstance(e, dict) and isinstance(e.get("job"), dict):
+                nj = normalise_job(e["job"], ss.S["timezone"])
+                lib.append({"id": txt(e.get("id")) or new_id(), "saved_at": txt(e.get("saved_at")) or now_iso(ss.S["timezone"]),
+                            "name": txt(e.get("name")) or nj["title"] or "Untitled job", "job": nj})
+        ss.library = lib
     else:
         ss.S = default_settings()
         ss.library = []
@@ -1468,6 +1487,7 @@ def init_state() -> None:
     ss.nav = "Job costing"
     ss._sig = None
     ss._confirm_del = None
+    ss._ready = DATA_VERSION
 
 
 def upsert_library(job: dict) -> str:
