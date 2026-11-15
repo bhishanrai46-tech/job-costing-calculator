@@ -1,13 +1,4 @@
-#!/usr/bin/env python3
-"""Job Costing & Quotation Calculator (single-file Streamlit app).
-
-Cost a job, price it to your target margin, issue locked quotes and invoices as PDF,
-track payments, and keep a job library with JSON backup.
-
-Install:  pip install streamlit reportlab pillow pandas tzdata
-Run:      streamlit run app.py
-Optional: set JOBCOST_DATA_FILE=~/jobcost-data.json to autosave to a file on your own computer.
-"""
+# Job Costing & Quotation Calculator
 from __future__ import annotations
 
 import base64
@@ -1316,18 +1307,6 @@ def save_file(payload: Dict) -> bool:
 # USER INTERFACE
 # ======================================================================
 
-#!/usr/bin/env python3
-"""Job Costing & Quotation Calculator (Streamlit).
-
-Cost a job, price it to your target margin, issue locked quotes and invoices as PDF,
-track payments, and keep a job library with JSON backup.
-
-Run:  streamlit run app.py
-"""
-
-
-
-
 ss = st.session_state
 
 PAGES = ["Job costing", "Quote & invoice", "Job library", "Business settings"]
@@ -1335,11 +1314,11 @@ PAGES = ["Job costing", "Quote & invoice", "Job library", "Business settings"]
 CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');
-:root { --ink:#0B1220; --muted:#475569; --line:#D0D7E2; --soft:#F1F5F9; --accent:#1D4ED8; --side:#0B1526;
+:root { --ink:#0B1220; --line:rgba(128,128,128,.35); --soft:rgba(128,128,128,.18); --accent:#3B82F6; --side:#0B1526;
   --good:#047857; --warn:#B45309; --bad:#B91C1C; --good-bg:#D1FAE5; --warn-bg:#FEF3C7; --bad-bg:#FEE2E2; --neutral-bg:#E2E8F0; }
 html, body, [class*="css"] { font-family: Inter, "Segoe UI", system-ui, sans-serif; }
 .block-container { padding-top: 1.2rem; max-width: 1280px; }
-h1.pg { font-size: 1.45rem; font-weight: 700; letter-spacing: -0.03em; margin: 0 0 .5rem; line-height: 1.25; color: var(--ink); }
+h1.pg { font-size: 1.45rem; font-weight: 700; letter-spacing: -0.03em; margin: 0 0 .5rem; line-height: 1.25; color: inherit; }
 .crumb { font-size:.72rem; font-weight:700; letter-spacing:.07em; text-transform:uppercase; color: var(--accent); margin-bottom:.2rem; }
 .hero { background: var(--side); color:#F8FAFC; border-radius:8px; padding:1.1rem 1.15rem 1rem; margin-bottom:.85rem; }
 .hero-label { font-size:.7rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:#94A3B8; margin-bottom:.25rem; }
@@ -1356,7 +1335,7 @@ h1.pg { font-size: 1.45rem; font-weight: 700; letter-spacing: -0.03em; margin: 0
 .brk { display:flex; justify-content:space-between; align-items:baseline; padding:.42rem 0; border-bottom:1px solid var(--line); font-size:.9rem; gap:.5rem; }
 .brk:last-child { border-bottom:none; }
 .brk .nm { flex:1; min-width:0; } .brk .am { font-family:"JetBrains Mono",monospace; font-weight:500; white-space:nowrap; }
-.brk .pc { color:var(--muted); font-size:.78rem; min-width:3rem; text-align:right; margin-left:.35rem; display:inline-block; }
+.brk .pc { opacity:.7; font-size:.78rem; min-width:3rem; text-align:right; margin-left:.35rem; display:inline-block; }
 .brk.str .nm, .brk.str .am { font-weight:700; }
 .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:.45rem; }
 .segbar { display:flex; height:12px; border-radius:3px; overflow:hidden; margin:.45rem 0 .8rem; background:var(--soft); }
@@ -1366,11 +1345,11 @@ h1.pg { font-size: 1.45rem; font-weight: 700; letter-spacing: -0.03em; margin: 0
 .head { display:flex; justify-content:space-between; align-items:center; font-weight:600; }
 .chip { background:var(--neutral-bg); color:var(--ink); font-size:.8rem; font-weight:700; font-family:"JetBrains Mono",monospace; padding:.2rem .55rem; border-radius:4px; }
 .tiles { display:grid; grid-template-columns:repeat(4,1fr); gap:.6rem; margin-bottom:.8rem; }
-.tile { background:#fff; border:1px solid var(--line); border-radius:8px; padding:.7rem .85rem; }
-.tile .l { font-size:.68rem; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); }
+.tile { background:rgba(128,128,128,.08); border:1px solid var(--line); border-radius:8px; padding:.7rem .85rem; }
+.tile .l { font-size:.68rem; font-weight:700; letter-spacing:.05em; text-transform:uppercase; opacity:.7; }
 .tile .v { font-family:"JetBrains Mono",monospace; font-weight:600; font-size:1.15rem; margin-top:.15rem; }
 .price { font-family:"JetBrains Mono",monospace; font-weight:600; font-size:1.05rem; padding-top:.3rem; }
-.pill { display:inline-block; font-size:.72rem; font-weight:700; padding:.1rem .5rem; border-radius:99px; background:var(--neutral-bg); }
+.pill { display:inline-block; font-size:.72rem; font-weight:700; padding:.1rem .5rem; border-radius:99px; background:rgba(128,128,128,.28); color:inherit; }
 @media (max-width: 768px) {
   .block-container { padding-left:.65rem; padding-right:.65rem; }
   .hero-price { font-size:1.55rem; } .hero-stats { grid-template-columns:1fr 1fr; } .tiles { grid-template-columns:1fr 1fr; }
@@ -2018,14 +1997,14 @@ def page_library() -> None:
         f = figs[entry["id"]]
         saved = (entry.get("saved_at") or "")[:16].replace("T", " ")
         with st.container(border=True):
-            a, b, c = st.columns([3, 1.4, 1.8])
+            a, b, c = st.columns([2.2, 1.2, 3.4])
             with a:
                 st.markdown(md(f"**{name}**"))
                 st.caption(md(f"{job.get('client') or '-'} · {saved}"))
                 st.html(f'<span class="pill">{esc(job.get("status", "Draft"))}</span>')
             with b:
                 st.html(f'<div class="price">{esc(money(S, f["total"]))}</div>'
-                        f'<div style="font-size:.72rem;color:#475569">{"locked, incl. tax" if f["locked"] else "at current rates"}</div>')
+                        f'<div style="font-size:.72rem;opacity:.7">{"locked, incl. tax" if f["locked"] else "at current rates"}</div>')
             with c:
                 if ss._confirm_del == entry["id"]:
                     st.caption("Delete this job?")
